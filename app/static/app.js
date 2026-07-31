@@ -54,10 +54,14 @@
     if (t.includes("prerušen") || t.includes("pocujem") || t.includes("počujem") || t.includes("hovor ďalej") || t.includes("hovor dalej")) {
       return "hearing";
     }
-    if (t.includes("ticho") || t.includes("odošlem") || t.includes("odoslem")) return "silence";
+    // Countdown po pustení holdu — nie ready text s „odošlem“.
+    if (t.startsWith("pauza") || /\bpauza[…. ]/.test(t)) return "silence";
+    if (t.includes("nahrávam") || t.includes("pokračujem v nahrávaní")) return "listening";
+    // Pripravený PTT stav (nezamieňať s Pauza).
+    if (t.includes("drž mikrofón") && t.includes("po pustení")) return "idle";
     if (
       t.includes("počúvam") || t.includes("pocuvam") || t.includes("počúvanie")
-      || t.includes("live") || t.includes("mikrofón")
+      || t.includes("live")
     ) {
       return "listening";
     }
@@ -1390,7 +1394,7 @@
   }
 
   function pttReadyStatus() {
-    setStatus(`Drž mikrofón a hovor. Po pustení počkám ${silenceTimeoutSec()} s a odošlem AI.`);
+    setStatus(`Pripravené — drž mikrofón a hovor. Po pustení počkám ${silenceTimeoutSec()} s.`);
   }
 
   async function pttStartHold(e) {
