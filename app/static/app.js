@@ -70,13 +70,9 @@
     if (t.startsWith("pauza") || /\bpauza[…. ]/.test(t)) return "silence";
     if (t.includes("nahrávam") || t.includes("pokračujem v nahrávaní")) return "listening";
     // Pripravený PTT stav (nezamieňať s Pauza).
+    if (t.includes("ťukni na mikrofón") || (t.includes("mikrofón") && t.includes("odošle"))) return "idle";
     if (t.includes("drž mikrofón") && t.includes("po pustení")) return "idle";
-    if (
-      t.includes("počúvam") || t.includes("pocuvam") || t.includes("počúvanie")
-      || t.includes("live")
-    ) {
-      return "listening";
-    }
+    if (t.includes("nahrávam")) return "listening";
     if (
       t.includes("ai odpovedá") || t.includes("ai hovorí") || t.includes("ukážka")
       || t.includes("prehávam") || t.includes("prehrávam") || t.includes("odpovedá")
@@ -768,10 +764,10 @@
     btn.setAttribute("aria-pressed", holding ? "true" : "false");
     const label = btn.querySelector(".ptt-label");
     if (label) {
-      if (holding) label.textContent = "Nahrávam";
+      if (holding) label.textContent = "Stop / odošli";
       else if (state.ptt?.finalizing) label.textContent = "Odosielam…";
       else if (state.ptt?.processing) label.textContent = "Spracúvam…";
-      else label.textContent = "Drž a hovor";
+      else label.textContent = "Ťukni a hovor";
     }
   }
 
@@ -1660,12 +1656,11 @@
   }
 
   function pttReadyStatus() {
-    setStatus(`Pripravené — drž mikrofón a hovor. Po pustení počkám ${silenceTimeoutSec()} s.`);
+    setStatus("Pripravené — ťukni na mikrofón (ďalšie ťuknutie zastaví a odošle).");
   }
 
   function resetStuckPtt(ptt) {
     if (!ptt) return;
-    // Nikdy nenechaj tichý early-return kvôli zaseknutému flagu.
     if (ptt.finalizing) ptt.finalizing = false;
     if (ptt.holding && !ptt.recording) {
       ptt.holding = false;
@@ -1677,50 +1672,42 @@
     }
   }
 
-  async function pttStartHold(e) {
+  async function pttToggleMic(e) {
     if (e?.button != null && e.button !== 0) return;
     if (!state.sessionId || !isPttMode()) {
       setStatus("Najprv spusti konverzáciu alebo voľnú debatu.", true);
       return;
     }
+    const ptt = ensurePtt();
+    resetStuckPtt(ptt);
+    if (ptt.finalizing || ptt.processing) {
+      // Preruš AI / odosielanie a začni novú nahrávku.
+      interruptAiSpeech();
+      ptt.finalizing = false;
+    }
+    if (ptt.holding || ptt.recording) {
+      await pttStopRecordingAndSend();
+      return;
+    }
+    await pttStartRecording();
+  }
+
+  async function pttStartRecording() {
     if (!window.MediaRecorder) {
       setStatus("Tento prehliadač nepodporuje nahrávanie hlasu (MediaRecorder).", true);
       return;
     }
-
     const ptt = ensurePtt();
-    resetStuckPtt(ptt);
-
-    if (ptt.holding) {
-      // Už držíme — ignoruj duplicitný touch+pointer.
-      return;
-    }
-    if (ptt.processing) {
-      interruptAiSpeech();
-    }
-
-    if (e?.preventDefault) e.preventDefault();
-    if (e?.pointerId != null) {
-      try {
-        e.currentTarget?.setPointerCapture?.(e.pointerId);
-      } catch (_) {}
-      ptt.pointerId = e.pointerId;
-    } else {
-      ptt.pointerId = "touch";
-    }
-
-    const bargeIn = !!(ptt.processing || state.currentAudio || state.currentAudioSource || ptt.abortController);
-    const continuing = !bargeIn && pttHasPendingUtterance(ptt);
+    if (ptt.holding || ptt.recording) return;
 
     clearPttPauseTimer();
     interruptAiSpeech();
-    if (!continuing) discardPttUtterance(ptt);
+    discardPttUtterance(ptt);
 
-    // Okamžitá vizuálna odozva (pred akýmkoľvek await).
     ptt.holding = true;
     ptt.recording = false;
     syncPttUi();
-    setStatus("Nahrávam… hovor. Keď skončíš, pusť tlačidlo.");
+    setStatus("Nahrávam… ťukni znova na Stop / odošli.");
     unlockAudioPlayback().catch(() => {});
 
     try {
@@ -1746,7 +1733,7 @@
         recorder = mime
           ? new MediaRecorder(ptt.stream, { mimeType: mime })
           : new MediaRecorder(ptt.stream);
-      } catch (err) {
+      } catch (_) {
         recorder = new MediaRecorder(ptt.stream);
         ptt.recorderMime = recorder.mimeType || "audio/mp4";
       }
@@ -1757,7 +1744,6 @@
       recorder.start(250);
       ptt.recording = true;
       syncPttUi();
-      if (!ptt.holding) pttEndHold({ pointerId: ptt.pointerId });
     } catch (err) {
       ptt.holding = false;
       ptt.recording = false;
@@ -1767,66 +1753,66 @@
     }
   }
 
-  function pttEndHold(e) {
+  async function pttStopRecordingAndSend() {
     const ptt = state.ptt;
-    if (!ptt?.holding) return;
-    if (
-      e?.pointerId != null
-      && ptt.pointerId != null
-      && ptt.pointerId !== "touch"
-      && e.pointerId !== ptt.pointerId
-    ) {
-      return;
-    }
+    if (!ptt) return;
+    if (!ptt.holding && !ptt.recording) return;
 
     ptt.holding = false;
     ptt.pointerId = null;
     syncPttUi();
+    clearPttPauseTimer();
 
     if (!ptt.recording || !ptt.recorder) {
-      if (pttHasPendingUtterance(ptt)) schedulePttSend(ptt);
-      else pttReadyStatus();
+      if (pttHasPendingUtterance(ptt)) {
+        await flushPttAndUpload(ptt);
+      } else {
+        releasePttStream(ptt);
+        pttReadyStatus();
+      }
       return;
     }
 
     const recorder = ptt.recorder;
     const blobType = recorderBlobType(ptt.recorderMime || recorder.mimeType || "");
 
-    recorder.onstop = () => {
-      ptt.recording = false;
-      ptt.recorder = null;
-      if (ptt.chunks?.length) {
-        ptt.pendingSegments.push(new Blob(ptt.chunks, { type: blobType }));
-        ptt.chunks = [];
-      }
-      releasePttStream(ptt);
-      if (!pttHasPendingUtterance(ptt)) {
-        setStatus("Príliš krátky záznam — drž mikrofón dlhšie.");
-        syncPttUi();
-        return;
-      }
-      schedulePttSend(ptt);
-    };
-
-    try {
+    await new Promise((resolve) => {
+      recorder.onstop = () => {
+        ptt.recording = false;
+        ptt.recorder = null;
+        if (ptt.chunks?.length) {
+          ptt.pendingSegments.push(new Blob(ptt.chunks, { type: blobType }));
+          ptt.chunks = [];
+        }
+        releasePttStream(ptt);
+        resolve();
+      };
       try {
-        recorder.requestData?.();
-      } catch (_) {}
-      if (recorder.state === "paused") {
         try {
-          recorder.resume();
+          recorder.requestData?.();
         } catch (_) {}
+        if (recorder.state === "paused") {
+          try {
+            recorder.resume();
+          } catch (_) {}
+        }
+        if (recorder.state !== "inactive") recorder.stop();
+        else recorder.onstop();
+      } catch (_) {
+        ptt.recording = false;
+        ptt.recorder = null;
+        releasePttStream(ptt);
+        resolve();
       }
-      if (recorder.state !== "inactive") recorder.stop();
-      else recorder.onstop();
-    } catch (_) {
-      ptt.recording = false;
-      ptt.recorder = null;
-      releasePttStream(ptt);
-      if (pttHasPendingUtterance(ptt)) schedulePttSend(ptt);
-      else pttReadyStatus();
+    });
+
+    if (!pttHasPendingUtterance(ptt)) {
+      setStatus("Príliš krátky záznam — ťukni znova a hovor dlhšie.");
+      syncPttUi();
+      return;
     }
-    syncPttUi();
+    // Toggle režim: po druhom ťuknutí odošli hneď (bez čakania na ticho).
+    await flushPttAndUpload(ptt);
   }
 
   function bindPttMicButton() {
@@ -1834,52 +1820,21 @@
     if (!mic || mic.dataset.pttBound === "1") return;
     mic.dataset.pttBound = "1";
 
-    let touchActive = false;
-
-    const onTouchStart = (e) => {
-      touchActive = true;
+    let lastToggleAt = 0;
+    const onToggle = (e) => {
       e.preventDefault();
-      pttStartHold(e).catch((err) => setStatus(err.message || String(err), true));
-    };
-    const onTouchEnd = (e) => {
-      if (!touchActive) return;
-      touchActive = false;
-      e.preventDefault();
-      pttEndHold(e);
+      e.stopPropagation();
+      const now = Date.now();
+      if (now - lastToggleAt < 400) return;
+      lastToggleAt = now;
+      pttToggleMic(e).catch((err) => setStatus(err.message || String(err), true));
     };
 
-    mic.addEventListener("touchstart", onTouchStart, { passive: false });
-    mic.addEventListener("touchend", onTouchEnd, { passive: false });
-    mic.addEventListener("touchcancel", onTouchEnd, { passive: false });
-
-    mic.addEventListener("pointerdown", (e) => {
-      // Po touchstarte príde aj pointerdown — nespúšťaj dva razy.
-      if (touchActive || e.pointerType === "touch") return;
-      pttStartHold(e).catch((err) => setStatus(err.message || String(err), true));
+    // Toggle: jedno ťuknutie = štart, druhé = stop + odoslať (nie hold).
+    mic.addEventListener("click", onToggle);
+    mic.addEventListener("keydown", (e) => {
+      if (e.key === " " || e.key === "Enter") onToggle(e);
     });
-    mic.addEventListener("pointerup", (e) => {
-      if (e.pointerType === "touch") return;
-      pttEndHold(e);
-    });
-    mic.addEventListener("pointercancel", (e) => {
-      if (e.pointerType === "touch") return;
-      pttEndHold(e);
-    });
-    mic.addEventListener("lostpointercapture", (e) => {
-      if (e.pointerType === "touch") return;
-      pttEndHold(e);
-    });
-
-    // Desktop: pustenie mimo tlačidla
-    mic.addEventListener("mouseup", (e) => {
-      if (touchActive) return;
-      pttEndHold(e);
-    });
-    mic.addEventListener("mouseleave", (e) => {
-      if (touchActive) return;
-      if (state.ptt?.holding) pttEndHold(e);
-    });
-
     mic.addEventListener("contextmenu", (e) => e.preventDefault());
   }
 
