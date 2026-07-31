@@ -38,8 +38,11 @@
     isPractice: false,
     startInFlight: false,
     currentAudio: null,
+    currentAudioSource: null,
     audioUnlocked: false,
     audioContext: null,
+    audioEl: null,
+    audioKeepalive: null,
     micPermission: null,
     ptt: null,
   };
@@ -139,95 +142,184 @@
   }
 
   function stopCurrentAudio() {
+    const source = state.currentAudioSource;
+    if (source) {
+      try {
+        source.stop(0);
+      } catch (_) {}
+      state.currentAudioSource = null;
+    }
     const audio = state.currentAudio;
     if (!audio) return;
     try {
       audio.pause();
       const src = audio.src;
-      audio.removeAttribute("src");
-      audio.load();
+      if (audio !== state.audioEl) {
+        audio.removeAttribute("src");
+        audio.load();
+      }
       if (src && src.startsWith("blob:")) URL.revokeObjectURL(src);
     } catch (_) {}
     state.currentAudio = null;
   }
 
-  async function unlockAudioPlayback() {
-    if (state.audioUnlocked) return;
+  function base64ToUint8Array(b64) {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+
+  function base64ToMp3ObjectUrl(b64) {
+    const bytes = base64ToUint8Array(b64);
+    const blob = new Blob([bytes], { type: "audio/mpeg" });
+    return URL.createObjectURL(blob);
+  }
+
+  async function ensureAudioContext() {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return null;
+    if (!state.audioContext) state.audioContext = new Ctx();
+    if (state.audioContext.state === "suspended") {
+      try {
+        await state.audioContext.resume();
+      } catch (_) {}
+    }
+    return state.audioContext;
+  }
+
+  async function startAudioKeepalive() {
+    // iOS: udrž audio session živú počas async Whisper/LLM/TTS.
+    if (state.audioKeepalive) return;
     try {
-      const Ctx = window.AudioContext || window.webkitAudioContext;
-      if (Ctx) {
-        const ctx = state.audioContext || new Ctx();
-        state.audioContext = ctx;
-        if (ctx.state === "suspended") await ctx.resume();
-        const buffer = ctx.createBuffer(1, 1, 22050);
-        const source = ctx.createBufferSource();
-        source.buffer = buffer;
-        source.connect(ctx.destination);
-        source.start(0);
-      }
-      // Unlock HTMLAudioElement autoplay on iOS during the user gesture.
       const warm = new Audio(
         "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA="
       );
+      warm.loop = true;
       warm.volume = 0.01;
-      await warm.play().catch(() => {});
+      await warm.play();
+      state.audioKeepalive = warm;
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  function stopAudioKeepalive() {
+    const warm = state.audioKeepalive;
+    if (!warm) return;
+    try {
+      warm.pause();
+      warm.src = "";
+    } catch (_) {}
+    state.audioKeepalive = null;
+  }
+
+  async function unlockAudioPlayback() {
+    try {
+      await ensureAudioContext();
+      if (!state.audioEl) {
+        state.audioEl = new Audio();
+        state.audioEl.preload = "auto";
+        state.audioEl.setAttribute("playsinline", "true");
+        state.audioEl.playsInline = true;
+      }
+      // Odomkni HTMLAudioElement počas user gesture.
+      const warm = state.audioEl;
+      const prevVol = warm.volume;
+      warm.volume = 0.01;
+      warm.src =
+        "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=";
       try {
+        await warm.play();
         warm.pause();
       } catch (_) {}
+      warm.volume = prevVol || 1;
+      await startAudioKeepalive();
       state.audioUnlocked = true;
     } catch (_) {
       // Best-effort; replay via 🔊 still works on tap.
     }
   }
 
-  function base64ToMp3ObjectUrl(b64) {
-    const binary = atob(b64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-    const blob = new Blob([bytes], { type: "audio/mpeg" });
-    return URL.createObjectURL(blob);
+  async function playViaWebAudio(b64) {
+    const ctx = await ensureAudioContext();
+    if (!ctx) throw new Error("AudioContext unavailable");
+    const bytes = base64ToUint8Array(b64);
+    // decodeAudioData si ArrayBuffer „odznačí“ — treba kópiu.
+    const copy = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    const audioBuffer = await ctx.decodeAudioData(copy);
+    stopCurrentAudio();
+    const source = ctx.createBufferSource();
+    source.buffer = audioBuffer;
+    try {
+      source.playbackRate.value = currentSpeechRate();
+    } catch (_) {}
+    source.connect(ctx.destination);
+    state.currentAudioSource = source;
+    return new Promise((resolve, reject) => {
+      source.onended = () => {
+        if (state.currentAudioSource === source) state.currentAudioSource = null;
+        resolve();
+      };
+      try {
+        source.start(0);
+      } catch (err) {
+        state.currentAudioSource = null;
+        reject(err);
+      }
+    });
   }
 
-  function playBase64Mp3(b64) {
+  async function playViaHtmlAudio(b64) {
     stopCurrentAudio();
-    if (!b64) return Promise.resolve();
-    // Blob URL is more reliable on iOS than giant data: URLs.
     const url = base64ToMp3ObjectUrl(b64);
-    const audio = new Audio();
+    const audio = state.audioEl || new Audio();
+    state.audioEl = audio;
     audio.preload = "auto";
+    audio.setAttribute("playsinline", "true");
+    audio.playsInline = true;
     audio.src = url;
-    // Spoľahlivá rýchlosť prehrávania (Edge % niekedy málo počuť).
     audio.playbackRate = currentSpeechRate();
     audio.preservesPitch = true;
     state.currentAudio = audio;
-    return new Promise((resolve) => {
-      let done = false;
-      const finish = (blocked) => {
-        if (done) return;
-        done = true;
-        if (state.currentAudio === audio) state.currentAudio = null;
-        try {
-          URL.revokeObjectURL(url);
-        } catch (_) {}
-        if (blocked) {
-          setStatus("Zvuk zablokovaný prehliadačom — ťukni na 🔊 pri odpovedi AI.", true);
-        }
-        resolve();
-      };
-      audio.addEventListener("ended", () => finish(false));
-      audio.addEventListener("error", () => finish(false));
-      const tryPlay = () => {
-        const p = audio.play();
-        if (p && typeof p.then === "function") {
-          p.then(() => {}).catch(() => finish(true));
-        }
-      };
-      if (state.audioContext?.state === "suspended") {
-        state.audioContext.resume().finally(tryPlay);
-      } else {
-        tryPlay();
-      }
-    });
+    try {
+      await audio.play();
+      await new Promise((resolve) => {
+        const finish = () => {
+          audio.removeEventListener("ended", finish);
+          audio.removeEventListener("error", finish);
+          resolve();
+        };
+        audio.addEventListener("ended", finish);
+        audio.addEventListener("error", finish);
+      });
+    } finally {
+      if (state.currentAudio === audio) state.currentAudio = null;
+      try {
+        URL.revokeObjectURL(url);
+      } catch (_) {}
+    }
+  }
+
+  async function playBase64Mp3(b64) {
+    if (!b64) return true;
+    stopCurrentAudio();
+    await ensureAudioContext();
+    // 1) Web Audio — spoľahlivejšie po async na iOS
+    try {
+      await playViaWebAudio(b64);
+      return true;
+    } catch (_) {
+      /* fallback */
+    }
+    // 2) HTMLAudioElement (odomknutý element)
+    try {
+      await playViaHtmlAudio(b64);
+      return true;
+    } catch (_) {
+      setStatus("Zvuk zablokovaný prehliadačom — ťukni na 🔊 pri odpovedi AI.", true);
+      return false;
+    }
   }
 
   async function blobToBase64(blob) {
@@ -1461,6 +1553,7 @@
     interruptAiSpeech();
     discardPttUtterance(ptt);
     releasePttStream(ptt);
+    stopAudioKeepalive();
     state.ptt = null;
     syncPttUi();
   }
@@ -1491,8 +1584,9 @@
 
     clearPttPauseTimer();
     interruptAiSpeech();
-    // Odomkni audio počas user gesture (iOS Safari autoplay).
-    unlockAudioPlayback().catch(() => {});
+    // Odomkni audio počas user gesture (iOS Safari autoplay) + keepalive.
+    await unlockAudioPlayback();
+    startAudioKeepalive().catch(() => {});
 
     if (!continuing) {
       discardPttUtterance(ptt);
@@ -1653,16 +1747,20 @@
       if (data.learned_facts?.length) {
         setStatus(`Zapísané o tebe: ${data.learned_facts.join("; ")}`);
       } else if (state.mode === "free_debate") {
-        setStatus("AI odpovedá…");
+        setStatus("AI hovorí…");
       } else {
-        setStatus(`Otázky: ${data.questions_asked}/${data.min_questions}`);
+        setStatus("AI hovorí…");
       }
       await loadLearning();
       ptt.processing = false;
       syncPttUi();
-      await playBase64Mp3(data.audio_base64);
+      // Počas hold/unlock sme odomkli audio; pred play ešte raz resume.
+      await unlockAudioPlayback();
+      setStatus("AI hovorí…");
+      const played = await playBase64Mp3(data.audio_base64);
       if (fromPtt && isPttMode() && state.sessionId) {
-        pttReadyStatus();
+        if (played) pttReadyStatus();
+        // ak play zlyhalo, nechaj chybovú hlášku (ťukni na 🔊)
       }
     } catch (err) {
       if (err?.name === "AbortError") {
