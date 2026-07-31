@@ -1077,7 +1077,15 @@ async def conversation_utterance(
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Whisper STT: {exc}") from exc
     if not transcript:
-        raise HTTPException(status_code=400, detail="Nepodarilo sa rozpoznať reč.")
+        # Whisper often invents words from silence; treat as no speech (not a hard failure).
+        return {
+            "transcript": "",
+            "reply": "",
+            "audio_base64": None,
+            "no_speech": True,
+            "detail": "Nepočul som ťa — skús znova držať mikrofón a hovoriť jasnejšie.",
+            "speech_rate": rate,
+        }
     llm = get_provider(settings, session.provider_name, getattr(session, "llm_model", None) or None)
     result = await conversation_engine.user_turn(session, llm, transcript)
     facts = list(result.get("learned_facts") or [])
@@ -1091,6 +1099,7 @@ async def conversation_utterance(
         "audio_base64": audio_b64,
         "learned_facts": added,
         "speech_rate": rate,
+        "no_speech": False,
     }
 
 

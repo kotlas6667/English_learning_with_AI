@@ -38,6 +38,8 @@
     isPractice: false,
     startInFlight: false,
     currentAudio: null,
+    audioUnlocked: false,
+    audioContext: null,
     ptt: null,
   };
 
@@ -136,30 +138,90 @@
     if (!audio) return;
     try {
       audio.pause();
-      audio.src = "";
+      const src = audio.src;
+      audio.removeAttribute("src");
+      audio.load();
+      if (src && src.startsWith("blob:")) URL.revokeObjectURL(src);
     } catch (_) {}
     state.currentAudio = null;
+  }
+
+  async function unlockAudioPlayback() {
+    if (state.audioUnlocked) return;
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (Ctx) {
+        const ctx = state.audioContext || new Ctx();
+        state.audioContext = ctx;
+        if (ctx.state === "suspended") await ctx.resume();
+        const buffer = ctx.createBuffer(1, 1, 22050);
+        const source = ctx.createBufferSource();
+        source.buffer = buffer;
+        source.connect(ctx.destination);
+        source.start(0);
+      }
+      // Unlock HTMLAudioElement autoplay on iOS during the user gesture.
+      const warm = new Audio(
+        "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA="
+      );
+      warm.volume = 0.01;
+      await warm.play().catch(() => {});
+      try {
+        warm.pause();
+      } catch (_) {}
+      state.audioUnlocked = true;
+    } catch (_) {
+      // Best-effort; replay via 🔊 still works on tap.
+    }
+  }
+
+  function base64ToMp3ObjectUrl(b64) {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    const blob = new Blob([bytes], { type: "audio/mpeg" });
+    return URL.createObjectURL(blob);
   }
 
   function playBase64Mp3(b64) {
     stopCurrentAudio();
     if (!b64) return Promise.resolve();
-    const audio = new Audio(`data:audio/mpeg;base64,${b64}`);
+    // Blob URL is more reliable on iOS than giant data: URLs.
+    const url = base64ToMp3ObjectUrl(b64);
+    const audio = new Audio();
+    audio.preload = "auto";
+    audio.src = url;
     // Spoľahlivá rýchlosť prehrávania (Edge % niekedy málo počuť).
     audio.playbackRate = currentSpeechRate();
     audio.preservesPitch = true;
     state.currentAudio = audio;
     return new Promise((resolve) => {
       let done = false;
-      const finish = () => {
+      const finish = (blocked) => {
         if (done) return;
         done = true;
         if (state.currentAudio === audio) state.currentAudio = null;
+        try {
+          URL.revokeObjectURL(url);
+        } catch (_) {}
+        if (blocked) {
+          setStatus("Zvuk zablokovaný prehliadačom — ťukni na 🔊 pri odpovedi AI.", true);
+        }
         resolve();
       };
-      audio.addEventListener("ended", finish);
-      audio.addEventListener("error", finish);
-      audio.play().catch(finish);
+      audio.addEventListener("ended", () => finish(false));
+      audio.addEventListener("error", () => finish(false));
+      const tryPlay = () => {
+        const p = audio.play();
+        if (p && typeof p.then === "function") {
+          p.then(() => {}).catch(() => finish(true));
+        }
+      };
+      if (state.audioContext?.state === "suspended") {
+        state.audioContext.resume().finally(tryPlay);
+      } else {
+        tryPlay();
+      }
     });
   }
 
@@ -1223,6 +1285,18 @@
     ptt.pendingSegments = [];
   }
 
+  function releasePttStream(ptt) {
+    if (!ptt) return;
+    try {
+      ptt.stream?.getTracks?.().forEach((t) => {
+        try {
+          t.stop();
+        } catch (_) {}
+      });
+    } catch (_) {}
+    ptt.stream = null;
+  }
+
   function stopAndCollectPttBlob(ptt) {
     return new Promise((resolve) => {
       const finish = () => {
@@ -1286,14 +1360,17 @@
     setStatus("Spracúvam hlas…");
     try {
       const blob = await stopAndCollectPttBlob(ptt);
-      if (blob.size < 800) {
-        setStatus("Príliš krátky záznam — drž mikrofón dlhšie.");
+      // Uvoľni mic hneď — inak iOS nechá oranžový indikátor zapnutý.
+      releasePttStream(ptt);
+      if (blob.size < 1200) {
+        setStatus("Príliš krátky záznam / ticho — drž mikrofón a hovor jasnejšie.");
         syncPttUi();
         return;
       }
       await uploadConversation(blob, { fromPtt: true });
     } finally {
       ptt.finalizing = false;
+      releasePttStream(ptt);
       syncPttUi();
     }
   }
@@ -1307,7 +1384,7 @@
     clearPttPauseTimer();
     interruptAiSpeech();
     discardPttUtterance(ptt);
-    ptt.stream?.getTracks?.().forEach((t) => t.stop());
+    releasePttStream(ptt);
     state.ptt = null;
     syncPttUi();
   }
@@ -1338,6 +1415,8 @@
 
     clearPttPauseTimer();
     interruptAiSpeech();
+    // Odomkni audio počas user gesture (iOS Safari autoplay).
+    unlockAudioPlayback().catch(() => {});
 
     if (!continuing) {
       discardPttUtterance(ptt);
@@ -1388,6 +1467,7 @@
     } catch (err) {
       ptt.holding = false;
       ptt.recording = false;
+      releasePttStream(ptt);
       syncPttUi();
       setStatus(`Mikrofón: ${err.message}`, true);
     }
@@ -1404,28 +1484,17 @@
 
     if (!ptt.recording || !ptt.recorder) {
       if (pttHasPendingUtterance(ptt)) schedulePttSend(ptt);
-      else pttReadyStatus();
+      else {
+        releasePttStream(ptt);
+        pttReadyStatus();
+      }
       return;
     }
 
     const recorder = ptt.recorder;
 
-    // Preferuj pause/resume — jedna súvislá webm nahrávka naprieč hold/release.
-    if (recorderCanPause(recorder) && recorder.state === "recording") {
-      try {
-        try {
-          recorder.requestData?.();
-        } catch (_) {}
-        recorder.pause();
-        ptt.recording = false;
-        schedulePttSend(ptt);
-        syncPttUi();
-        return;
-      } catch (_) {
-        // pokračuj stop/start fallbackom nižšie
-      }
-    }
-
+    // Vždy stop (nie pause): pause necháva MediaStream track live → iOS oranžový mic.
+    // Pokračovanie počas pauzy = nový recorder + pendingSegments.
     recorder.onstop = () => {
       ptt.recording = false;
       ptt.recorder = null;
@@ -1433,6 +1502,7 @@
         ptt.pendingSegments.push(new Blob(ptt.chunks, { type: "audio/webm" }));
         ptt.chunks = [];
       }
+      releasePttStream(ptt);
       if (!pttHasPendingUtterance(ptt)) {
         setStatus("Príliš krátky záznam — drž mikrofón dlhšie.");
         syncPttUi();
@@ -1442,11 +1512,20 @@
     };
 
     try {
+      try {
+        recorder.requestData?.();
+      } catch (_) {}
+      if (recorder.state === "paused") {
+        try {
+          recorder.resume();
+        } catch (_) {}
+      }
       if (recorder.state !== "inactive") recorder.stop();
       else recorder.onstop();
     } catch (_) {
       ptt.recording = false;
       ptt.recorder = null;
+      releasePttStream(ptt);
       if (pttHasPendingUtterance(ptt)) schedulePttSend(ptt);
     }
     syncPttUi();
@@ -1488,6 +1567,11 @@
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.detail || "Chyba");
+      if (data.no_speech) {
+        setStatus(data.detail || "Nepočul som ťa — skús znova.");
+        if (fromPtt && isPttMode() && state.sessionId) pttReadyStatus();
+        return;
+      }
       appendChat("user", data.transcript || "(audio)");
       appendChat("assistant", data.reply, { audioBase64: data.audio_base64 });
       if (data.learned_facts?.length) {
