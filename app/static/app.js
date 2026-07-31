@@ -2,6 +2,7 @@
   const $ = (id) => document.getElementById(id);
   const TOKEN_KEY = "englearning_token";
   const SETTINGS_KEY = "englearning_lesson_settings";
+  const MIC_KEY = "englearning_mic_permission";
   const SETTINGS_FIELDS = [
     "mode",
     "level",
@@ -43,7 +44,14 @@
     audioContext: null,
     audioEl: null,
     audioKeepalive: null,
-    micPermission: null,
+    micPermission: (() => {
+      try {
+        const v = localStorage.getItem("englearning_mic_permission");
+        return v === "granted" || v === "denied" ? v : null;
+      } catch (_) {
+        return null;
+      }
+    })(),
     ptt: null,
   };
 
@@ -573,8 +581,10 @@
       setAuthMode("login");
       showApp();
       await bootApp();
-      // Hneď po prihlásení (user gesture) vyžiadaj mic — nie až pri PTT.
-      await ensureMicPermission();
+      // Prompt len ak ešte nebolo udelené (localStorage / Permissions API).
+      if (state.micPermission !== "granted") {
+        await ensureMicPermission();
+      }
       unlockAudioPlayback().catch(() => {});
       if (state.micPermission === "granted") {
         setStatus(`Prihlásený: ${data.user.name}${data.user.is_admin ? " (Administrator)" : ""} · mikrofón OK`);
@@ -1141,8 +1151,10 @@
       if ($(id)) $(id).disabled = true;
     }
     try {
-    // Skôr než speach UI: vyžiadaj mic počas kliku na Štart / Voľná debata.
-    await ensureMicPermission();
+    // Skôr než speech UI: mic prompt len ak ešte nie je zapamätaný grant.
+    if (state.micPermission !== "granted") {
+      await ensureMicPermission();
+    }
     unlockAudioPlayback().catch(() => {});
     await stopPtt();
     if (forceMode) $("mode").value = forceMode;
@@ -1367,23 +1379,40 @@
 
   async function ensureMicPermission(opts = {}) {
     const quiet = !!opts.quiet;
+    const allowPrompt = opts.prompt !== false;
     if (!navigator.mediaDevices?.getUserMedia) {
       state.micPermission = "unsupported";
       if (!quiet) setStatus("Tento prehliadač nepodporuje mikrofón.", true);
       return false;
     }
-    if (state.micPermission === "granted") return true;
 
-    // Permissions API (Chrome); Safari často nepodporuje name=microphone.
+    // 1) Už máme grant v pamäti / localStorage — nevolaj znova getUserMedia (Safari by sa znova pýtala).
+    if (state.micPermission === "granted") return true;
+    try {
+      const stored = localStorage.getItem(MIC_KEY);
+      if (stored === "granted") {
+        state.micPermission = "granted";
+        return true;
+      }
+      if (stored === "denied") state.micPermission = "denied";
+    } catch (_) {}
+
+    // 2) Permissions API (Chrome; Safari často nepodporuje)
     try {
       if (navigator.permissions?.query) {
         const status = await navigator.permissions.query({ name: "microphone" });
         if (status.state === "granted") {
           state.micPermission = "granted";
+          try {
+            localStorage.setItem(MIC_KEY, "granted");
+          } catch (_) {}
           return true;
         }
         if (status.state === "denied") {
           state.micPermission = "denied";
+          try {
+            localStorage.setItem(MIC_KEY, "denied");
+          } catch (_) {}
           if (!quiet) {
             setStatus(
               "Mikrofón je zablokovaný. V Safari: Aa → Webová stránka → Mikrofón → Povoliť.",
@@ -1392,10 +1421,31 @@
           }
           return false;
         }
+        status.onchange = () => {
+          if (status.state === "granted" || status.state === "denied") {
+            state.micPermission = status.state;
+            try {
+              localStorage.setItem(MIC_KEY, status.state);
+            } catch (_) {}
+          }
+        };
       }
     } catch (_) {
       /* ignore */
     }
+
+    if (state.micPermission === "denied") {
+      if (!quiet) {
+        setStatus(
+          "Mikrofón je zablokovaný. V Safari: Aa → Webová stránka → Mikrofón → Povoliť.",
+          true
+        );
+      }
+      return false;
+    }
+
+    // 3) Prompt len ak ešte nebolo udelené (a volajúci to chce — pri refreshi nie).
+    if (!allowPrompt) return false;
 
     try {
       if (!quiet) setStatus("Vyžadujem prístup k mikrofónu…");
@@ -1408,11 +1458,17 @@
         } catch (_) {}
       });
       state.micPermission = "granted";
+      try {
+        localStorage.setItem(MIC_KEY, "granted");
+      } catch (_) {}
       unlockAudioPlayback().catch(() => {});
-      if (!quiet) setStatus("Mikrofón povolený.");
+      if (!quiet) setStatus("Mikrofón povolený — nabudúce sa už nebudem pýtať.");
       return true;
     } catch (err) {
       state.micPermission = "denied";
+      try {
+        localStorage.setItem(MIC_KEY, "denied");
+      } catch (_) {}
       const msg = String(err?.message || err || "");
       if (!quiet) {
         setStatus(
@@ -1672,6 +1728,10 @@
         ptt.stream = await navigator.mediaDevices.getUserMedia({
           audio: micAudioConstraints(),
         });
+        state.micPermission = "granted";
+        try {
+          localStorage.setItem(MIC_KEY, "granted");
+        } catch (_) {}
       }
       if (!state.ptt || !ptt.holding) {
         releasePttStream(ptt);
