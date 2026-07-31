@@ -1280,8 +1280,13 @@
         }),
       });
       appendChat("assistant", data.reply, { audioBase64: data.audio_base64 });
+      const confusedNote = data.confused?.length
+        ? `Zapísané: nerozumel otázke — ${data.confused.map((c) => c.summary).filter(Boolean).join("; ")}. `
+        : "";
       if (data.learned_facts?.length) {
         setStatus(`Zapísané o tebe: ${data.learned_facts.join("; ")}. Otázky: ${data.questions_asked}/${data.min_questions}`);
+      } else if (confusedNote) {
+        setStatus(`${confusedNote}AI to preformuluje.`);
       } else if (state.mode === "free_debate") {
         setStatus("AI odpovedá…");
       } else {
@@ -1864,23 +1869,26 @@
       }
       appendChat("user", data.transcript || "(audio)");
       appendChat("assistant", data.reply, { audioBase64: data.audio_base64 });
+      const confusedNote = data.confused?.length
+        ? `Zapísané: nerozumel otázke — ${data.confused.map((c) => c.summary).filter(Boolean).join("; ")}. `
+        : "";
       if (data.learned_facts?.length) {
         setStatus(`Zapísané o tebe: ${data.learned_facts.join("; ")}`);
-      } else if (state.mode === "free_debate") {
-        setStatus("AI hovorí…");
+      } else if (confusedNote) {
+        setStatus(`${confusedNote}AI to preformuluje.`);
       } else {
         setStatus("AI hovorí…");
       }
       await loadLearning();
       ptt.processing = false;
       syncPttUi();
-      // Počas hold/unlock sme odomkli audio; pred play ešte raz resume.
       await unlockAudioPlayback();
-      setStatus("AI hovorí…");
       const played = await playBase64Mp3(data.audio_base64);
       if (fromPtt && isPttMode() && state.sessionId) {
-        if (played) pttReadyStatus();
-        // ak play zlyhalo, nechaj chybovú hlášku (ťukni na 🔊)
+        if (played) {
+          if (confusedNote) setStatus(confusedNote.trim());
+          else pttReadyStatus();
+        }
       }
     } catch (err) {
       if (err?.name === "AbortError") {

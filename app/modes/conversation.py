@@ -7,6 +7,7 @@ from uuid import uuid4
 from app.learning_store import (
     LearningItem,
     LearningStore,
+    parse_confused_tags,
     parse_learn_tags,
     parse_topic_tag,
     parse_unknown_tags,
@@ -121,10 +122,11 @@ class ConversationEngine:
             scenario=session.scenario,
         )
 
-    def _process_reply(self, session: ConversationSession, reply: str) -> tuple[str, list[tuple[str, str]], list[str]]:
+    def _process_reply(self, session: ConversationSession, reply: str) -> tuple[str, list[tuple[str, str]], list[str], list[tuple[str, str]]]:
         cleaned, unknowns = parse_unknown_tags(reply)
         cleaned, facts = parse_learn_tags(cleaned)
         cleaned, topic = parse_topic_tag(cleaned)
+        cleaned, confused = parse_confused_tags(cleaned)
         if topic and not session.suggested_topic:
             session.suggested_topic = topic
             session.topic = topic
@@ -132,9 +134,10 @@ class ConversationEngine:
         if asked:
             session.questions_asked += 1
         self._store_unknowns(session, unknowns)
+        self._store_confused(session, confused)
         if facts:
             session.learned_facts.extend(facts)
-        return cleaned.strip(), unknowns, facts
+        return cleaned.strip(), unknowns, facts, confused
 
     async def opening_message(self, session: ConversationSession, llm: LLMProvider) -> str:
         system = self._system(session)
@@ -157,7 +160,7 @@ class ConversationEngine:
                 "Ask one in-character question and end with [[ask]]."
             )
         reply = await llm.chat([{"role": "user", "content": starter}], system=system)
-        cleaned, _unknowns, _facts = self._process_reply(session, reply)
+        cleaned, _unknowns, _facts, _confused = self._process_reply(session, reply)
         session.history.append({"role": "assistant", "content": cleaned})
         session.opening = cleaned
         return cleaned
@@ -171,7 +174,9 @@ class ConversationEngine:
             hint = (
                 "\n(System note: continue the free debate. Follow the learner's interest. "
                 "Mark new personal facts with [[learn:...]] and unknown words with "
-                "[[unknown:word|Slovak]]. End questions with [[ask]].)"
+                "[[unknown:word|Slovak]]. If they do not understand your question, mark "
+                "[[confused:summary|note]], rephrase simply, and ask again. "
+                "End questions with [[ask]].)"
             )
         else:
             remaining = max(0, session.min_questions - session.questions_asked)
@@ -179,6 +184,8 @@ class ConversationEngine:
                 "\n(System note: Stay IN CHARACTER in the agreed scenario. "
                 "Do NOT meta-teach phrases ('you can say…', 'try saying…'). "
                 "React as your role and push the scene forward with one question. "
+                "If the learner does not understand your question, mark "
+                "[[confused:summary|note]], rephrase more simply IN CHARACTER, and ask again. "
                 "End question turns with [[ask]]."
             )
             if remaining > 0:
@@ -194,7 +201,7 @@ class ConversationEngine:
             system=system,
         )
         session.history[-1] = {"role": "user", "content": user_text}
-        cleaned, unknowns, facts = self._process_reply(session, reply)
+        cleaned, unknowns, facts, confused = self._process_reply(session, reply)
         session.history.append({"role": "assistant", "content": cleaned})
         session.history = trim_chat_history(
             session.history, max_messages=CHAT_HISTORY_MESSAGES_MAX
@@ -209,6 +216,7 @@ class ConversationEngine:
         return {
             "reply": cleaned,
             "unknowns": [{"word": w, "translation": t} for w, t in unknowns],
+            "confused": [{"summary": s, "note": n} for s, n in confused],
             "learned_facts": facts,
             "suggested_topic": session.suggested_topic,
             "questions_asked": session.questions_asked,
@@ -235,6 +243,24 @@ class ConversationEngine:
                     level=session.level,
                     topic=session.topic or "free_debate",
                     significance=6,
+                )
+            )
+
+    def _store_confused(
+        self, session: ConversationSession, confused: list[tuple[str, str]]
+    ) -> None:
+        store = self._store(session)
+        for summary, note in confused:
+            store.upsert(
+                LearningItem(
+                    kind="question_gap",
+                    word=summary[:120],
+                    translation_sk=note[:200] if note else "Nerozumel otázke",
+                    level=session.level,
+                    topic=session.topic or ("free_debate" if session.free_debate else ""),
+                    tip="Learner did not understand the question — rephrase next time.",
+                    context=summary,
+                    significance=7,
                 )
             )
 

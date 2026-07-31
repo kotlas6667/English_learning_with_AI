@@ -17,11 +17,16 @@ _UNKNOWN_TAG = re.compile(
 )
 _LEARN_TAG = re.compile(r"\[\[learn:(?P<fact>[^\]]+)\]\]", re.IGNORECASE)
 _TOPIC_TAG = re.compile(r"\[\[topic:(?P<topic>[^\]]+)\]\]", re.IGNORECASE)
+# Learner did not understand the tutor's question → store + rephrase.
+_CONFUSED_TAG = re.compile(
+    r"\[\[confused:(?P<summary>[^|\]]+)(?:\|(?P<note>[^\]]+))?\]\]",
+    re.IGNORECASE,
+)
 
 
 @dataclass
 class LearningItem:
-    kind: str  # vocabulary | reading_error | comprehension
+    kind: str  # vocabulary | reading_error | comprehension | question_gap
     word: str
     translation_sk: str = ""
     level: str = "A2"
@@ -107,6 +112,21 @@ def parse_topic_tag(text: str) -> tuple[str, str | None]:
     return re.sub(r"[ \t]{2,}", " ", cleaned).strip(), topic
 
 
+def parse_confused_tags(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """Extract [[confused:question summary|optional note]] markers."""
+    found: list[tuple[str, str]] = []
+
+    def _repl(match: re.Match[str]) -> str:
+        summary = (match.group("summary") or "").strip()
+        note = (match.group("note") or "").strip()
+        if summary:
+            found.append((summary, note))
+        return ""
+
+    cleaned = _CONFUSED_TAG.sub(_repl, text)
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip(), found
+
+
 def _next_interval(times_correct: int) -> int:
     idx = min(max(times_correct, 0), len(INTERVALS_DAYS) - 1)
     return INTERVALS_DAYS[idx]
@@ -119,6 +139,7 @@ class MarkdownLearningStore(LearningStore):
         "vocabulary": "vocabulary.md",
         "reading_error": "reading_errors.md",
         "comprehension": "comprehension.md",
+        "question_gap": "question_gaps.md",
     }
 
     HEADERS = [
@@ -280,6 +301,7 @@ class MarkdownLearningStore(LearningStore):
             "vocabulary": "Unknown vocabulary",
             "reading_error": "Reading / expression errors",
             "comprehension": "Comprehension gaps",
+            "question_gap": "Did not understand the question",
         }.get(kind, kind)
         lines = [
             f"# {title}",
