@@ -40,6 +40,7 @@
     currentAudio: null,
     audioUnlocked: false,
     audioContext: null,
+    micPermission: null,
     ptt: null,
   };
 
@@ -443,7 +444,14 @@
       setAuthMode("login");
       showApp();
       await bootApp();
-      setStatus(`Prihlásený: ${data.user.name}${data.user.is_admin ? " (Administrator)" : ""}`);
+      // Hneď po prihlásení (user gesture) vyžiadaj mic — nie až pri PTT.
+      await ensureMicPermission();
+      unlockAudioPlayback().catch(() => {});
+      if (state.micPermission === "granted") {
+        setStatus(`Prihlásený: ${data.user.name}${data.user.is_admin ? " (Administrator)" : ""} · mikrofón OK`);
+      } else {
+        setStatus(`Prihlásený: ${data.user.name}${data.user.is_admin ? " (Administrator)" : ""}`);
+      }
     } catch (e) {
       err.textContent = e.message || "Akcia zlyhala.";
       err.hidden = false;
@@ -1002,6 +1010,9 @@
       if ($(id)) $(id).disabled = true;
     }
     try {
+    // Skôr než speach UI: vyžiadaj mic počas kliku na Štart / Voľná debata.
+    await ensureMicPermission();
+    unlockAudioPlayback().catch(() => {});
     await stopPtt();
     if (forceMode) $("mode").value = forceMode;
     syncModeUi();
@@ -1216,6 +1227,67 @@
       channelCount: { ideal: 1 },
       sampleRate: { ideal: 16000 },
     };
+  }
+
+  async function ensureMicPermission(opts = {}) {
+    const quiet = !!opts.quiet;
+    if (!navigator.mediaDevices?.getUserMedia) {
+      state.micPermission = "unsupported";
+      if (!quiet) setStatus("Tento prehliadač nepodporuje mikrofón.", true);
+      return false;
+    }
+    if (state.micPermission === "granted") return true;
+
+    // Permissions API (Chrome); Safari často nepodporuje name=microphone.
+    try {
+      if (navigator.permissions?.query) {
+        const status = await navigator.permissions.query({ name: "microphone" });
+        if (status.state === "granted") {
+          state.micPermission = "granted";
+          return true;
+        }
+        if (status.state === "denied") {
+          state.micPermission = "denied";
+          if (!quiet) {
+            setStatus(
+              "Mikrofón je zablokovaný. V Safari: Aa → Webová stránka → Mikrofón → Povoliť.",
+              true
+            );
+          }
+          return false;
+        }
+      }
+    } catch (_) {
+      /* ignore */
+    }
+
+    try {
+      if (!quiet) setStatus("Vyžadujem prístup k mikrofónu…");
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: micAudioConstraints(),
+      });
+      stream.getTracks().forEach((t) => {
+        try {
+          t.stop();
+        } catch (_) {}
+      });
+      state.micPermission = "granted";
+      unlockAudioPlayback().catch(() => {});
+      if (!quiet) setStatus("Mikrofón povolený.");
+      return true;
+    } catch (err) {
+      state.micPermission = "denied";
+      const msg = String(err?.message || err || "");
+      if (!quiet) {
+        setStatus(
+          /denied|not allowed|permission/i.test(msg)
+            ? "Mikrofón zamietnutý. Povoľ ho pre túto stránku a skús znova."
+            : `Mikrofón: ${msg}`,
+          true
+        );
+      }
+      return false;
+    }
   }
 
   function ensurePtt() {
@@ -2195,6 +2267,11 @@
       saveToken(state.token, me.user);
       showApp();
       await bootApp();
+      // Bez čerstvého gesture Safari nemusí ukázať prompt — skúsime; pri Štart to zopakujeme.
+      const ok = await ensureMicPermission({ quiet: true });
+      if (!ok && state.micPermission !== "granted") {
+        setStatus("Mikrofón ešte nie je povolený — pri Štart / Voľná debata ho vyžiadam.");
+      }
     } catch (_) {
       clearSession();
       showAuthGate();
