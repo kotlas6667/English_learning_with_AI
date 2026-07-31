@@ -69,15 +69,13 @@
     // Countdown po pustení holdu — nie ready text s „odošlem“.
     if (t.startsWith("pauza") || /\bpauza[…. ]/.test(t)) return "silence";
     if (t.includes("nahrávam") || t.includes("pokračujem v nahrávaní")) return "listening";
-    // Pripravený PTT stav (nezamieňať s Pauza).
+    // Pripravený PTT stav (toggle).
     if (t.includes("ťukni na mikrofón") || (t.includes("mikrofón") && t.includes("odošle"))) return "idle";
     if (t.includes("drž mikrofón") && t.includes("po pustení")) return "idle";
-    if (t.includes("nahrávam")) return "listening";
     if (
-      t.includes("ai odpovedá") || t.includes("ai hovorí") || t.includes("ukážka")
-      || t.includes("prehávam") || t.includes("prehrávam") || t.includes("odpovedá")
+      t.includes("počúvam") || t.includes("pocuvam") || t.includes("počúvanie") || t.includes("live")
     ) {
-      return "speaking";
+      return "listening";
     }
     if (
       t.includes("spracúvam") || t.includes("generujem") || t.includes("pripravujem")
