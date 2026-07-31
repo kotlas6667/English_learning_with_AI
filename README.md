@@ -24,7 +24,8 @@ docker compose up -d --build
 
 UI:
 - LAN: `http://<IP>:8080` (e.g. `http://192.168.1.109:8080`)
-- Tailscale: `http://100.82.143.35:8080/`
+- Tailscale HTTP: `http://100.82.143.35:8080/`
+- Tailscale HTTPS (odporúčané, mikrofón): `https://tomaspi.tail7d1cba.ts.net:8443/`
 
 ### Required in `.env`
 
@@ -53,19 +54,47 @@ uvicorn app.main:app --reload --port 8080
 2. Create `.env` with API keys (do not commit it).
 3. `docker compose up -d --build`
 4. Open on your LAN: `http://192.168.1.109:8080`
-5. Or via Tailscale (same tailnet): `http://100.82.143.35:8080/`
+5. Or via Tailscale HTTPS (odporúčané): `https://tomaspi.tail7d1cba.ts.net:8443/`
+6. Or via Tailscale HTTP: `http://100.82.143.35:8080/`
 
 ### Access via Tailscale
 
-With Tailscale installed on HAOS and on the client, open:
+**HTTPS (odporúčané — mikrofón v prehliadači):**
+
+`https://tomaspi.tail7d1cba.ts.net:8443/`
+
+- Client must be on the same Tailscale tailnet.
+- Uses Tailscale Serve (tailnet only, not Funnel / public internet).
+- Proxies to host EngLearning on `http://192.168.1.109:8080`.
+
+**HTTP (bez TLS, mikrofón často nefunguje):**
 
 `http://100.82.143.35:8080/`
 
-No code or Docker port changes are needed — Tailscale reaches the host on port `8080`.
+#### How Serve was enabled on HAOS
+
+In Tailscale admin ([DNS](https://login.tailscale.com/admin/dns)): enable **MagicDNS** and **HTTPS Certificates**.
+
+On HAOS, `tailscale` is not in the host SSH PATH — enter the add-on container first:
+
+```bash
+docker exec -it $(docker ps -q -f name=tailscale) /bin/bash
+/opt/tailscale serve --bg --https=8443 --set-path=/ http://192.168.1.109:8080
+/opt/tailscale serve status
+```
+
+If Share Home Assistant already uses HTTPS port `443`, EngLearning must use another port (`8443`). Status should show:
+
+```text
+https://tomaspi.tail7d1cba.ts.net:8443 (tailnet only)
+|-- / proxy http://192.168.1.109:8080
+```
+
+Disable with: `/opt/tailscale serve --https=8443 off`
 
 ### Microphone note
 
-Browsers often require **HTTPS** or `localhost` for the microphone. On plain LAN / Tailscale HTTP the mic may not work — use text input, a reverse proxy with TLS, or Tailscale Serve for HTTPS.
+Browsers often require **HTTPS** or `localhost` for the microphone. Prefer Tailscale Serve HTTPS above; plain LAN / Tailscale HTTP may force text input only.
 
 ## Data (`./data`)
 
