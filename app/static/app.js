@@ -1507,11 +1507,12 @@
       const finish = () => {
         const parts = [...(ptt.pendingSegments || [])];
         if (ptt.chunks?.length) parts.push(...ptt.chunks);
+        const mime = recorderBlobType(ptt.recorderMime || parts[0]?.type || "audio/webm");
         ptt.pendingSegments = [];
         ptt.chunks = [];
         ptt.recorder = null;
         ptt.recording = false;
-        resolve(new Blob(parts, { type: "audio/webm" }));
+        resolve(new Blob(parts, { type: mime }));
       };
 
       const recorder = ptt.recorder;
@@ -1782,7 +1783,10 @@
     syncPttUi();
     const fd = new FormData();
     fd.append("session_id", state.sessionId);
-    fd.append("audio", blob, "utterance.webm");
+    const ext = (blob.type || "").includes("mp4") || (blob.type || "").includes("aac")
+      ? "mp4"
+      : "webm";
+    fd.append("audio", blob, `utterance.${ext}`);
     fd.append("speech_rate", String(currentSpeechRate()));
     const controller = new AbortController();
     ptt.abortController = controller;
