@@ -22,7 +22,9 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-UI: `http://<IP>:8080` (e.g. `http://192.168.1.109:8080`)
+UI:
+- LAN: `http://<IP>:8080` (e.g. `http://192.168.1.109:8080`)
+- Tailscale: `http://100.82.143.35:8080/`
 
 ### Required in `.env`
 
@@ -50,11 +52,20 @@ uvicorn app.main:app --reload --port 8080
 1. Copy the project (git clone / Samba / SCP) onto HAOS.
 2. Create `.env` with API keys (do not commit it).
 3. `docker compose up -d --build`
-4. Open `http://192.168.1.109:8080` on your LAN.
+4. Open on your LAN: `http://192.168.1.109:8080`
+5. Or via Tailscale (same tailnet): `http://100.82.143.35:8080/`
+
+### Access via Tailscale
+
+With Tailscale installed on HAOS and on the client, open:
+
+`http://100.82.143.35:8080/`
+
+No code or Docker port changes are needed — Tailscale reaches the host on port `8080`.
 
 ### Microphone note
 
-Browsers often require **HTTPS** or `localhost` for the microphone. On plain LAN HTTP the mic may not work — use text input, or a reverse proxy with TLS.
+Browsers often require **HTTPS** or `localhost` for the microphone. On plain LAN / Tailscale HTTP the mic may not work — use text input, a reverse proxy with TLS, or Tailscale Serve for HTTPS.
 
 ## Data (`./data`)
 

@@ -4,7 +4,7 @@
 **Jazyk komunikácie s používateľom:** slovenčina.  
 **Workspace:** `C:\PROGRAMING_SYNCHRO_DISK\PROGRAMOVANIE\11.PYTHON\EngLearning_HAOS`
 
-Aktualizované: 2026-07-30.
+Aktualizované: 2026-07-31.
 
 ---
 
@@ -15,6 +15,7 @@ Hlasová webová app na výučbu angličtiny (A2–B2).
 - **Backend:** FastAPI (`app/main.py`)
 - **Frontend:** `app/static/` (`index.html`, `app.js`, `styles.css`)
 - **Deploy:** Docker na HAOS (HAOS = len hostiteľ kontajnera; **žiadna funkčná väzba na Home Assistant**)
+- **Tailscale:** `http://100.82.143.35:8080/` (prístup z tailnetu na port `8080`)
 - **LLM** = len text (OpenAI / Gemini / Mistral)
 - **TTS** = Edge-TTS (bez kľúča) alebo ElevenLabs
 - **STT** = Whisper (potrebuje `OPENAI_API_KEY`)
@@ -26,6 +27,8 @@ Lokálny beh typicky:
 ```
 
 UI: `http://127.0.0.1:8080`  
+LAN (HAOS): `http://192.168.1.109:8080`  
+Tailscale: `http://100.82.143.35:8080/`  
 Docker: `docker compose up -d --build` → port `8080`, volume `./data:/app/data`
 
 ---
