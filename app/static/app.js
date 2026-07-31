@@ -2544,9 +2544,13 @@
       saveToken(state.token, me.user);
       showApp();
       await bootApp();
-      // Bez čerstvého gesture Safari nemusí ukázať prompt — skúsime; pri Štart to zopakujeme.
-      const ok = await ensureMicPermission({ quiet: true });
-      if (!ok && state.micPermission !== "granted") {
+      // Pri refreshi NEVYŽADUJ prompt znova — len localStorage / Permissions API.
+      await ensureMicPermission({ quiet: true, prompt: false });
+      if (state.micPermission === "granted") {
+        setStatus("Pripravené. Mikrofón je už povolený.");
+      } else if (state.micPermission === "denied") {
+        setStatus("Mikrofón je zablokovaný v prehliadači — povoľ ho v nastaveniach stránky.", true);
+      } else {
         setStatus("Mikrofón ešte nie je povolený — pri Štart / Voľná debata ho vyžiadam.");
       }
     } catch (_) {
