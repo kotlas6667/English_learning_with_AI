@@ -4,7 +4,7 @@
 **Jazyk komunikácie s používateľom:** slovenčina.  
 **Workspace:** `C:\PROGRAMING_SYNCHRO_DISK\PROGRAMOVANIE\11.PYTHON\EngLearning_HAOS`
 
-Aktualizované: 2026-07-30.
+Aktualizované: 2026-07-31.
 
 ---
 
@@ -15,6 +15,8 @@ Hlasová webová app na výučbu angličtiny (A2–B2).
 - **Backend:** FastAPI (`app/main.py`)
 - **Frontend:** `app/static/` (`index.html`, `app.js`, `styles.css`)
 - **Deploy:** Docker na HAOS (HAOS = len hostiteľ kontajnera; **žiadna funkčná väzba na Home Assistant**)
+- **Tailscale HTTPS (odporúčané):** `https://tomaspi.tail7d1cba.ts.net:8443/` — Serve, proxy na `192.168.1.109:8080` (mikrofón)
+- **Tailscale HTTP:** `http://100.82.143.35:8080/`
 - **LLM** = len text (OpenAI / Gemini / Mistral)
 - **TTS** = Edge-TTS (bez kľúča) alebo ElevenLabs
 - **STT** = Whisper (potrebuje `OPENAI_API_KEY`)
@@ -26,7 +28,23 @@ Lokálny beh typicky:
 ```
 
 UI: `http://127.0.0.1:8080`  
+LAN (HAOS): `http://192.168.1.109:8080`  
+Tailscale HTTPS: `https://tomaspi.tail7d1cba.ts.net:8443/`  
+Tailscale HTTP: `http://100.82.143.35:8080/`  
 Docker: `docker compose up -d --build` → port `8080`, volume `./data:/app/data`
+
+### Tailscale Serve (HAOS) — rýchly handoff
+
+Na HAOS host SSH **nie je** `tailscale` v PATH. Vstúp do add-onu a nastav Serve:
+
+```bash
+docker exec -it $(docker ps -q -f name=tailscale) /bin/bash
+/opt/tailscale serve --bg --https=8443 --set-path=/ http://192.168.1.109:8080
+/opt/tailscale serve status
+```
+
+Aktuálny stav: `https://tomaspi.tail7d1cba.ts.net:8443` → `http://192.168.1.109:8080` (tailnet only).  
+Port `8443`, lebo HA Serve už môže držať `443`. Vypnutie: `/opt/tailscale serve --https=8443 off`
 
 ---
 
