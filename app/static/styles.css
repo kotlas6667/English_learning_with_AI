@@ -536,9 +536,11 @@ button.ghost { background: transparent; }
 .ptt-mic {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 0.45rem;
   min-width: 3rem;
-  padding: 0.65rem 1.1rem;
+  min-height: 3rem;
+  padding: 0.85rem 1.2rem;
   border-radius: 999px;
   background: #1f3d2e;
   color: #e8fff0;
@@ -546,8 +548,12 @@ button.ghost { background: transparent; }
   user-select: none;
   touch-action: none;
   -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  position: relative;
+  z-index: 5;
 }
 .ptt-mic:hover { transform: translateY(-1px); }
+.ptt-mic:active,
 .ptt-mic.is-holding {
   background: var(--danger);
   color: #fff;
@@ -556,11 +562,14 @@ button.ghost { background: transparent; }
 }
 .ptt-mic.is-busy {
   opacity: 0.75;
-  cursor: wait;
 }
 .ptt-mic .ptt-icon {
   display: block;
   flex-shrink: 0;
+  pointer-events: none;
+}
+.ptt-mic .ptt-label {
+  pointer-events: none;
 }
 
 .muted, .feedback { color: var(--muted); }

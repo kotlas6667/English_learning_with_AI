@@ -752,13 +752,15 @@
     $("stopConv")?.classList.toggle("hidden", true);
     if (!btn) return;
     const holding = !!state.ptt?.holding;
-    const busy = !!state.ptt?.processing;
+    const busy = !!state.ptt?.processing || !!state.ptt?.finalizing;
     btn.classList.toggle("is-holding", holding);
     btn.classList.toggle("is-busy", busy && !holding);
+    btn.setAttribute("aria-pressed", holding ? "true" : "false");
     const label = btn.querySelector(".ptt-label");
     if (label) {
       if (holding) label.textContent = "Nahrávam";
-      else if (busy) label.textContent = "Spracúvam…";
+      else if (state.ptt?.finalizing) label.textContent = "Odosielam…";
+      else if (state.ptt?.processing) label.textContent = "Spracúvam…";
       else label.textContent = "Drž a hovor";
     }
   }
@@ -1600,49 +1602,64 @@
     setStatus(`Pripravené — drž mikrofón a hovor. Po pustení počkám ${silenceTimeoutSec()} s.`);
   }
 
+  function resetStuckPtt(ptt) {
+    if (!ptt) return;
+    // Nikdy nenechaj tichý early-return kvôli zaseknutému flagu.
+    if (ptt.finalizing) ptt.finalizing = false;
+    if (ptt.holding && !ptt.recording) {
+      ptt.holding = false;
+      ptt.pointerId = null;
+    }
+    if (ptt.recording && ptt.recorder && ptt.recorder.state !== "recording" && ptt.recorder.state !== "paused") {
+      ptt.recording = false;
+      ptt.recorder = null;
+    }
+  }
+
   async function pttStartHold(e) {
-    if (e.button != null && e.button !== 0) return;
+    if (e?.button != null && e.button !== 0) return;
     if (!state.sessionId || !isPttMode()) {
       setStatus("Najprv spusti konverzáciu alebo voľnú debatu.", true);
       return;
     }
-    const ptt = ensurePtt();
-    // Obnova po zaseknutom stave (race unlock vs pointerup).
-    if (ptt.holding && !ptt.recording && !ptt.finalizing) {
-      ptt.holding = false;
-      ptt.pointerId = null;
+    if (!window.MediaRecorder) {
+      setStatus("Tento prehliadač nepodporuje nahrávanie hlasu (MediaRecorder).", true);
+      return;
     }
-    if (ptt.holding || ptt.finalizing) return;
-    if (ptt.recording && ptt.recorder?.state === "recording") return;
 
-    e.preventDefault();
-    try {
-      e.currentTarget.setPointerCapture?.(e.pointerId);
-    } catch (_) {}
-    ptt.pointerId = e.pointerId;
+    const ptt = ensurePtt();
+    resetStuckPtt(ptt);
 
-    // Barge-in počas AI odpovede = nová výpoveď; počas pauzy = pokračovanie.
+    if (ptt.holding) {
+      // Už držíme — ignoruj duplicitný touch+pointer.
+      return;
+    }
+    if (ptt.processing) {
+      interruptAiSpeech();
+    }
+
+    if (e?.preventDefault) e.preventDefault();
+    if (e?.pointerId != null) {
+      try {
+        e.currentTarget?.setPointerCapture?.(e.pointerId);
+      } catch (_) {}
+      ptt.pointerId = e.pointerId;
+    } else {
+      ptt.pointerId = "touch";
+    }
+
     const bargeIn = !!(ptt.processing || state.currentAudio || state.currentAudioSource || ptt.abortController);
     const continuing = !bargeIn && pttHasPendingUtterance(ptt);
 
     clearPttPauseTimer();
     interruptAiSpeech();
+    if (!continuing) discardPttUtterance(ptt);
 
-    if (!continuing) {
-      discardPttUtterance(ptt);
-    }
-
-    // UI IHNEĎ — nečakaj na audio unlock (inak pointerup príde skôr a mic „nereaguje“).
+    // Okamžitá vizuálna odozva (pred akýmkoľvek await).
     ptt.holding = true;
     ptt.recording = false;
     syncPttUi();
-    setStatus(
-      continuing
-        ? "Pokračujem v nahrávaní… Keď skončíš, pusť tlačidlo."
-        : "Nahrávam… hovor. Keď skončíš, pusť tlačidlo."
-    );
-
-    // Audio unlock len na pozadí (timeoutované) — nesmie blokovať PTT.
+    setStatus("Nahrávam… hovor. Keď skončíš, pusť tlačidlo.");
     unlockAudioPlayback().catch(() => {});
 
     try {
@@ -1651,79 +1668,65 @@
           audio: micAudioConstraints(),
         });
       }
-      // Ak používateľ medzitým pustil, nepokračuj v nahrávaní.
-      if (!ptt.holding) {
+      if (!state.ptt || !ptt.holding) {
         releasePttStream(ptt);
         return;
       }
 
-      if (continuing && ptt.recorder?.state === "paused") {
-        try {
-          ptt.recorder.resume();
-          ptt.recording = true;
-          return;
-        } catch (_) {
-          try {
-            ptt.recorder.onstop = null;
-            ptt.recorder.stop();
-          } catch (_) {}
-          if (ptt.chunks?.length) {
-            const mime = ptt.recorderMime || "audio/webm";
-            ptt.pendingSegments.push(new Blob(ptt.chunks, { type: recorderBlobType(mime) }));
-            ptt.chunks = [];
-          }
-          ptt.recorder = null;
-        }
-      }
-
       ptt.chunks = [];
       const mime = pickRecorderMimeType();
-      ptt.recorderMime = mime;
-      const recorder = mime
-        ? new MediaRecorder(ptt.stream, { mimeType: mime })
-        : new MediaRecorder(ptt.stream);
+      ptt.recorderMime = mime || "audio/mp4";
+      let recorder;
+      try {
+        recorder = mime
+          ? new MediaRecorder(ptt.stream, { mimeType: mime })
+          : new MediaRecorder(ptt.stream);
+      } catch (err) {
+        recorder = new MediaRecorder(ptt.stream);
+        ptt.recorderMime = recorder.mimeType || "audio/mp4";
+      }
       ptt.recorder = recorder;
       recorder.ondataavailable = (ev) => {
         if (ev.data?.size > 0) ptt.chunks.push(ev.data);
       };
       recorder.start(250);
       ptt.recording = true;
-      if (!ptt.holding) {
-        // Pustil počas getUserMedia — ukonči rovnako ako pointerup.
-        pttEndHold({ pointerId: ptt.pointerId });
-      }
+      syncPttUi();
+      if (!ptt.holding) pttEndHold({ pointerId: ptt.pointerId });
     } catch (err) {
       ptt.holding = false;
       ptt.recording = false;
       releasePttStream(ptt);
       syncPttUi();
-      setStatus(`Mikrofón: ${err.message}`, true);
+      setStatus(`Mikrofón: ${err.message || err}`, true);
     }
   }
 
   function pttEndHold(e) {
     const ptt = state.ptt;
     if (!ptt?.holding) return;
-    if (e?.pointerId != null && ptt.pointerId != null && e.pointerId !== ptt.pointerId) return;
+    if (
+      e?.pointerId != null
+      && ptt.pointerId != null
+      && ptt.pointerId !== "touch"
+      && e.pointerId !== ptt.pointerId
+    ) {
+      return;
+    }
 
     ptt.holding = false;
     ptt.pointerId = null;
     syncPttUi();
 
     if (!ptt.recording || !ptt.recorder) {
-      // Ešte beží getUserMedia — po jeho dokončení startHold uvidí holding=false.
       if (pttHasPendingUtterance(ptt)) schedulePttSend(ptt);
-      else {
-        // Nechaj stream ak ešte nahrávame setup; inak ready.
-        pttReadyStatus();
-      }
+      else pttReadyStatus();
       return;
     }
 
     const recorder = ptt.recorder;
     const blobType = recorderBlobType(ptt.recorderMime || recorder.mimeType || "");
 
-    // Vždy stop (nie pause): pause necháva MediaStream track live → iOS oranžový mic.
     recorder.onstop = () => {
       ptt.recording = false;
       ptt.recorder = null;
@@ -1756,8 +1759,63 @@
       ptt.recorder = null;
       releasePttStream(ptt);
       if (pttHasPendingUtterance(ptt)) schedulePttSend(ptt);
+      else pttReadyStatus();
     }
     syncPttUi();
+  }
+
+  function bindPttMicButton() {
+    const mic = $("pttMicBtn");
+    if (!mic || mic.dataset.pttBound === "1") return;
+    mic.dataset.pttBound = "1";
+
+    let touchActive = false;
+
+    const onTouchStart = (e) => {
+      touchActive = true;
+      e.preventDefault();
+      pttStartHold(e).catch((err) => setStatus(err.message || String(err), true));
+    };
+    const onTouchEnd = (e) => {
+      if (!touchActive) return;
+      touchActive = false;
+      e.preventDefault();
+      pttEndHold(e);
+    };
+
+    mic.addEventListener("touchstart", onTouchStart, { passive: false });
+    mic.addEventListener("touchend", onTouchEnd, { passive: false });
+    mic.addEventListener("touchcancel", onTouchEnd, { passive: false });
+
+    mic.addEventListener("pointerdown", (e) => {
+      // Po touchstarte príde aj pointerdown — nespúšťaj dva razy.
+      if (touchActive || e.pointerType === "touch") return;
+      pttStartHold(e).catch((err) => setStatus(err.message || String(err), true));
+    });
+    mic.addEventListener("pointerup", (e) => {
+      if (e.pointerType === "touch") return;
+      pttEndHold(e);
+    });
+    mic.addEventListener("pointercancel", (e) => {
+      if (e.pointerType === "touch") return;
+      pttEndHold(e);
+    });
+    mic.addEventListener("lostpointercapture", (e) => {
+      if (e.pointerType === "touch") return;
+      pttEndHold(e);
+    });
+
+    // Desktop: pustenie mimo tlačidla
+    mic.addEventListener("mouseup", (e) => {
+      if (touchActive) return;
+      pttEndHold(e);
+    });
+    mic.addEventListener("mouseleave", (e) => {
+      if (touchActive) return;
+      if (state.ptt?.holding) pttEndHold(e);
+    });
+
+    mic.addEventListener("contextmenu", (e) => e.preventDefault());
   }
 
   async function beginReadingListen() {
@@ -2360,16 +2418,7 @@
   $("recordConv").addEventListener("click", () => startRecording("conversation").catch((e) => setStatus(e.message, true)));
   $("stopConv").addEventListener("click", () => stopRecording("conversation"));
   {
-    const mic = $("pttMicBtn");
-    if (mic) {
-      mic.addEventListener("pointerdown", (e) => {
-        pttStartHold(e).catch((err) => setStatus(err.message, true));
-      });
-      mic.addEventListener("pointerup", (e) => pttEndHold(e));
-      mic.addEventListener("pointercancel", (e) => pttEndHold(e));
-      mic.addEventListener("lostpointercapture", (e) => pttEndHold(e));
-      mic.addEventListener("contextmenu", (e) => e.preventDefault());
-    }
+    bindPttMicButton();
   }
   $("recordComp").addEventListener("click", () => startRecording("comprehension").catch((e) => setStatus(e.message, true)));
   $("stopComp").addEventListener("click", () => stopRecording("comprehension"));
