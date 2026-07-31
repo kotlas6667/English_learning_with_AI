@@ -197,7 +197,13 @@
       );
       warm.loop = true;
       warm.volume = 0.01;
-      await warm.play();
+      const playP = warm.play();
+      if (playP && typeof playP.then === "function") {
+        await Promise.race([
+          playP,
+          new Promise((resolve) => setTimeout(resolve, 400)),
+        ]);
+      }
       state.audioKeepalive = warm;
     } catch (_) {
       /* ignore */
@@ -216,29 +222,60 @@
 
   async function unlockAudioPlayback() {
     try {
-      await ensureAudioContext();
+      await Promise.race([
+        ensureAudioContext(),
+        new Promise((resolve) => setTimeout(resolve, 400)),
+      ]);
       if (!state.audioEl) {
         state.audioEl = new Audio();
         state.audioEl.preload = "auto";
         state.audioEl.setAttribute("playsinline", "true");
         state.audioEl.playsInline = true;
       }
-      // Odomkni HTMLAudioElement počas user gesture.
       const warm = state.audioEl;
       const prevVol = warm.volume;
       warm.volume = 0.01;
       warm.src =
         "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=";
       try {
-        await warm.play();
-        warm.pause();
+        const playP = warm.play();
+        if (playP && typeof playP.then === "function") {
+          await Promise.race([
+            playP,
+            new Promise((resolve) => setTimeout(resolve, 400)),
+          ]);
+        }
+        try {
+          warm.pause();
+        } catch (_) {}
       } catch (_) {}
       warm.volume = prevVol || 1;
-      await startAudioKeepalive();
+      startAudioKeepalive().catch(() => {});
       state.audioUnlocked = true;
     } catch (_) {
       // Best-effort; replay via 🔊 still works on tap.
     }
+  }
+
+  function pickRecorderMimeType() {
+    const types = [
+      "audio/mp4",
+      "audio/aac",
+      "audio/webm;codecs=opus",
+      "audio/webm",
+    ];
+    for (const t of types) {
+      try {
+        if (window.MediaRecorder?.isTypeSupported?.(t)) return t;
+      } catch (_) {}
+    }
+    return "";
+  }
+
+  function recorderBlobType(mime) {
+    if (mime && mime.startsWith("audio/mp4")) return "audio/mp4";
+    if (mime && mime.startsWith("audio/aac")) return "audio/aac";
+    return "audio/webm";
   }
 
   async function playViaWebAudio(b64) {
@@ -1569,6 +1606,11 @@
       return;
     }
     const ptt = ensurePtt();
+    // Obnova po zaseknutom stave (race unlock vs pointerup).
+    if (ptt.holding && !ptt.recording && !ptt.finalizing) {
+      ptt.holding = false;
+      ptt.pointerId = null;
+    }
     if (ptt.holding || ptt.finalizing) return;
     if (ptt.recording && ptt.recorder?.state === "recording") return;
 
@@ -1579,20 +1621,19 @@
     ptt.pointerId = e.pointerId;
 
     // Barge-in počas AI odpovede = nová výpoveď; počas pauzy = pokračovanie.
-    const bargeIn = !!(ptt.processing || state.currentAudio || ptt.abortController);
+    const bargeIn = !!(ptt.processing || state.currentAudio || state.currentAudioSource || ptt.abortController);
     const continuing = !bargeIn && pttHasPendingUtterance(ptt);
 
     clearPttPauseTimer();
     interruptAiSpeech();
-    // Odomkni audio počas user gesture (iOS Safari autoplay) + keepalive.
-    await unlockAudioPlayback();
-    startAudioKeepalive().catch(() => {});
 
     if (!continuing) {
       discardPttUtterance(ptt);
     }
 
+    // UI IHNEĎ — nečakaj na audio unlock (inak pointerup príde skôr a mic „nereaguje“).
     ptt.holding = true;
+    ptt.recording = false;
     syncPttUi();
     setStatus(
       continuing
@@ -1600,11 +1641,19 @@
         : "Nahrávam… hovor. Keď skončíš, pusť tlačidlo."
     );
 
+    // Audio unlock len na pozadí (timeoutované) — nesmie blokovať PTT.
+    unlockAudioPlayback().catch(() => {});
+
     try {
       if (!ptt.stream || ptt.stream.getTracks().every((t) => t.readyState === "ended")) {
         ptt.stream = await navigator.mediaDevices.getUserMedia({
           audio: micAudioConstraints(),
         });
+      }
+      // Ak používateľ medzitým pustil, nepokračuj v nahrávaní.
+      if (!ptt.holding) {
+        releasePttStream(ptt);
+        return;
       }
 
       if (continuing && ptt.recorder?.state === "paused") {
@@ -1613,13 +1662,13 @@
           ptt.recording = true;
           return;
         } catch (_) {
-          // fallback: nový segment na tom istom streame
           try {
             ptt.recorder.onstop = null;
             ptt.recorder.stop();
           } catch (_) {}
           if (ptt.chunks?.length) {
-            ptt.pendingSegments.push(new Blob(ptt.chunks, { type: "audio/webm" }));
+            const mime = ptt.recorderMime || "audio/webm";
+            ptt.pendingSegments.push(new Blob(ptt.chunks, { type: recorderBlobType(mime) }));
             ptt.chunks = [];
           }
           ptt.recorder = null;
@@ -1627,13 +1676,21 @@
       }
 
       ptt.chunks = [];
-      const recorder = new MediaRecorder(ptt.stream);
+      const mime = pickRecorderMimeType();
+      ptt.recorderMime = mime;
+      const recorder = mime
+        ? new MediaRecorder(ptt.stream, { mimeType: mime })
+        : new MediaRecorder(ptt.stream);
       ptt.recorder = recorder;
       recorder.ondataavailable = (ev) => {
         if (ev.data?.size > 0) ptt.chunks.push(ev.data);
       };
-      recorder.start(200);
+      recorder.start(250);
       ptt.recording = true;
+      if (!ptt.holding) {
+        // Pustil počas getUserMedia — ukonči rovnako ako pointerup.
+        pttEndHold({ pointerId: ptt.pointerId });
+      }
     } catch (err) {
       ptt.holding = false;
       ptt.recording = false;
@@ -1653,23 +1710,24 @@
     syncPttUi();
 
     if (!ptt.recording || !ptt.recorder) {
+      // Ešte beží getUserMedia — po jeho dokončení startHold uvidí holding=false.
       if (pttHasPendingUtterance(ptt)) schedulePttSend(ptt);
       else {
-        releasePttStream(ptt);
+        // Nechaj stream ak ešte nahrávame setup; inak ready.
         pttReadyStatus();
       }
       return;
     }
 
     const recorder = ptt.recorder;
+    const blobType = recorderBlobType(ptt.recorderMime || recorder.mimeType || "");
 
     // Vždy stop (nie pause): pause necháva MediaStream track live → iOS oranžový mic.
-    // Pokračovanie počas pauzy = nový recorder + pendingSegments.
     recorder.onstop = () => {
       ptt.recording = false;
       ptt.recorder = null;
       if (ptt.chunks?.length) {
-        ptt.pendingSegments.push(new Blob(ptt.chunks, { type: "audio/webm" }));
+        ptt.pendingSegments.push(new Blob(ptt.chunks, { type: blobType }));
         ptt.chunks = [];
       }
       releasePttStream(ptt);
