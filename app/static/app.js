@@ -191,25 +191,7 @@
   }
 
   async function startAudioKeepalive() {
-    // iOS: udrž audio session živú počas async Whisper/LLM/TTS.
-    if (state.audioKeepalive) return;
-    try {
-      const warm = new Audio(
-        "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA="
-      );
-      warm.loop = true;
-      warm.volume = 0.01;
-      const playP = warm.play();
-      if (playP && typeof playP.then === "function") {
-        await Promise.race([
-          playP,
-          new Promise((resolve) => setTimeout(resolve, 400)),
-        ]);
-      }
-      state.audioKeepalive = warm;
-    } catch (_) {
-      /* ignore */
-    }
+    // Keepalive loop removed — iOS Safari leakoval RAM pri Audio.loop = true.
   }
 
   function stopAudioKeepalive() {
@@ -217,7 +199,8 @@
     if (!warm) return;
     try {
       warm.pause();
-      warm.src = "";
+      warm.removeAttribute("src");
+      warm.load();
     } catch (_) {}
     state.audioKeepalive = null;
   }
@@ -234,8 +217,10 @@
         state.audioEl.setAttribute("playsinline", "true");
         state.audioEl.playsInline = true;
       }
+      // Jednorazový silent play (BEZ loop) — odomkne autoplay, nežíra RAM.
       const warm = state.audioEl;
       const prevVol = warm.volume;
+      warm.loop = false;
       warm.volume = 0.01;
       warm.src =
         "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=";
@@ -252,7 +237,6 @@
         } catch (_) {}
       } catch (_) {}
       warm.volume = prevVol || 1;
-      startAudioKeepalive().catch(() => {});
       state.audioUnlocked = true;
     } catch (_) {
       // Best-effort; replay via 🔊 still works on tap.
@@ -855,14 +839,20 @@
     state.ttsProvider = provider;
     try {
       const data = await api(`/api/voices?provider=${encodeURIComponent(provider)}`);
-      const voices = data.voices || [];
+      // Edge vie vrátiť veľa hlasov — v selecte drž len preferované + max ~40.
+      let voices = data.voices || [];
+      if (provider === "edge" && voices.length > 40) {
+        voices = voices.slice(0, 40);
+      }
       $("voice").innerHTML = "";
+      const frag = document.createDocumentFragment();
       for (const v of voices) {
         const opt = document.createElement("option");
         opt.value = v.voice_id;
         opt.textContent = `${v.name}${v.likely_english ? "" : " (other)"}`;
-        $("voice").appendChild(opt);
+        frag.appendChild(opt);
       }
+      $("voice").appendChild(frag);
       const preferred =
         provider === "edge"
           ? state.meta.default_tts_provider === "edge"
@@ -2488,6 +2478,21 @@
 
   (async () => {
     setAuthMode("login");
+    // Pri skrytí/zatvorení stránky uvoľni audio (ochrana pred RAM na iOS).
+    const cleanupAudio = () => {
+      try {
+        stopCurrentAudio();
+        stopAudioKeepalive();
+        if (state.audioContext && state.audioContext.state !== "closed") {
+          state.audioContext.suspend().catch(() => {});
+        }
+      } catch (_) {}
+    };
+    window.addEventListener("pagehide", cleanupAudio);
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) cleanupAudio();
+    });
+
     if (!state.token) {
       showAuthGate();
       return;
