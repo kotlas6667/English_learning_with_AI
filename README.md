@@ -59,10 +59,21 @@ Browsers often require **HTTPS** or `localhost` for the microphone. On plain LAN
 ## Data (`./data`)
 
 - `users.json` — user index
-- `users/<id>/` — `profile.md`, `history.md`, `vocabulary.md`, `reading_errors.md`, `comprehension.md`, `topics.json`
+- `users/<id>/` — `profile.md`, `history.md`, `vocabulary.md`, `reading_errors.md`, `comprehension.md`, `question_gaps.md`, `topics.json`, **`settings.json`** (lesson UI prefs)
 - `sessions.json` — auth session tokens
 
-Volume in `docker-compose.yml`: `./data:/app/data`.
+Volume in `docker-compose.yml`: `./data:/app/data` — **survives image rebuild**. Lesson settings are JSON here (SQLite not needed).
+
+### HAOS durable update (full rebuild, keep data)
+
+`docker cp` into a running container is temporary. Prefer:
+
+```bash
+# on HAOS — updates /share code, rebuilds image, keeps .env + data volume
+BRANCH=cursor/fix-mobile-mic-tts-4a94 bash /share/English_learning_with_AI/scripts/haos-full-deploy.sh
+```
+
+Or first-time: download the branch tarball, copy `scripts/haos-full-deploy.sh`, then run it. Settings live in `/mnt/data/supervisor/share/English_learning_with_AI/data/users/<id>/settings.json`.
 
 ## API (short)
 
