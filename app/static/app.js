@@ -941,6 +941,16 @@
     }
   }
 
+  function learningKindLabel(kind) {
+    const map = {
+      vocabulary: "slovíčko",
+      reading_error: "čítanie",
+      comprehension: "zlá odpoveď",
+      question_gap: "nerozumel otázke",
+    };
+    return map[kind] || kind;
+  }
+
   async function loadLearning() {
     const data = await api(`/api/learning?user_id=${encodeURIComponent(effectiveUserId() || "")}`);
     const dueWords = (data.due || []).map((d) => (typeof d === "string" ? d : d.word)).filter(Boolean);
@@ -954,7 +964,7 @@
       const tr = document.createElement("tr");
       tr.innerHTML = `
         <td><span class="sig-badge sig-${Math.min(10, Math.max(1, sig))}">${sig}/10</span></td>
-        <td>${escapeHtml(item.kind)}</td>
+        <td>${escapeHtml(learningKindLabel(item.kind))}</td>
         <td>${escapeHtml(item.word)}</td>
         <td>${escapeHtml(item.tip || item.translation_sk || "")}</td>
         <td>${escapeHtml(item.status)}</td>
@@ -1345,8 +1355,13 @@
       const confusedNote = data.confused?.length
         ? `Zapísané: nerozumel otázke — ${data.confused.map((c) => c.summary).filter(Boolean).join("; ")}. `
         : "";
+      const wrongNote = data.wrongs?.length
+        ? `Zapísané zlá odpoveď — ${data.wrongs.map((w) => w.summary).filter(Boolean).join("; ")}. `
+        : "";
       if (data.learned_facts?.length) {
         setStatus(`Zapísané o tebe: ${data.learned_facts.join("; ")}. Otázky: ${data.questions_asked}/${data.min_questions}`);
+      } else if (wrongNote) {
+        setStatus(`${wrongNote}Pozri learning store dole.`);
       } else if (confusedNote) {
         setStatus(`${confusedNote}AI to preformuluje.`);
       } else if (state.mode === "free_debate") {
@@ -1936,13 +1951,23 @@
         if (fromPtt && isPttMode() && state.sessionId) pttReadyStatus();
         return;
       }
-      appendChat("user", data.transcript || "(audio)");
+      const shown =
+        data.transcript_display || data.said || data.transcript || "(audio)";
+      appendChat("user", shown);
       appendChat("assistant", data.reply, { audioBase64: data.audio_base64 });
+      if ((data.wrongs && data.wrongs.length) || (data.confused && data.confused.length) || (data.unknowns && data.unknowns.length)) {
+        loadLearning().catch(() => {});
+      }
       const confusedNote = data.confused?.length
         ? `Zapísané: nerozumel otázke — ${data.confused.map((c) => c.summary).filter(Boolean).join("; ")}. `
         : "";
+      const wrongNote = data.wrongs?.length
+        ? `Zapísané zlá odpoveď — ${data.wrongs.map((w) => w.summary).filter(Boolean).join("; ")}. `
+        : "";
       if (data.learned_facts?.length) {
         setStatus(`Zapísané o tebe: ${data.learned_facts.join("; ")}`);
+      } else if (wrongNote) {
+        setStatus(`${wrongNote}Pozri learning store dole.`);
       } else if (confusedNote) {
         setStatus(`${confusedNote}AI to preformuluje.`);
       } else {
@@ -1955,7 +1980,8 @@
       const played = await playBase64Mp3(data.audio_base64);
       if (fromPtt && isPttMode() && state.sessionId) {
         if (played) {
-          if (confusedNote) setStatus(confusedNote.trim());
+          if (wrongNote) setStatus(wrongNote.trim());
+          else if (confusedNote) setStatus(confusedNote.trim());
           else pttReadyStatus();
         }
       }

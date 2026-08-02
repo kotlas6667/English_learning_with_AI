@@ -1078,9 +1078,11 @@ async def conversation_turn(
     _assert_session_owner(session.user_id, auth_uid)
     speech_rate = _session_speech_rate(session, body.speech_rate)
     llm = get_provider(settings, session.provider_name, getattr(session, "llm_model", None) or None)
-    result = await conversation_engine.user_turn(session, llm, body.text.strip())
+    raw_text = body.text.strip()
+    result = await conversation_engine.user_turn(session, llm, raw_text, from_stt=False)
     facts = list(result.get("learned_facts") or [])
-    added = _log_conversation_turn(session, body.text.strip(), result["reply"], facts=facts)
+    display = (result.get("transcript_display") or result.get("said") or raw_text).strip()
+    added = _log_conversation_turn(session, display, result["reply"], facts=facts)
     audio_b64 = await _speak_required(
         result["reply"], session.voice_id, session.tts_provider, speech_rate
     )
@@ -1120,15 +1122,17 @@ async def conversation_utterance(
             "speech_rate": rate,
         }
     llm = get_provider(settings, session.provider_name, getattr(session, "llm_model", None) or None)
-    result = await conversation_engine.user_turn(session, llm, transcript)
+    result = await conversation_engine.user_turn(session, llm, transcript, from_stt=True)
     facts = list(result.get("learned_facts") or [])
-    added = _log_conversation_turn(session, transcript, result["reply"], facts=facts)
+    display = (result.get("transcript_display") or result.get("said") or transcript).strip()
+    added = _log_conversation_turn(session, display, result["reply"], facts=facts)
     audio_b64 = await _speak_required(
         result["reply"], session.voice_id, session.tts_provider, rate
     )
     return {
         **result,
-        "transcript": transcript,
+        "transcript": display,
+        "transcript_raw": transcript,
         "audio_base64": audio_b64,
         "learned_facts": added,
         "speech_rate": rate,

@@ -22,6 +22,16 @@ _CONFUSED_TAG = re.compile(
     r"\[\[confused:(?P<summary>[^|\]]+)(?:\|(?P<note>[^\]]+))?\]\]",
     re.IGNORECASE,
 )
+# Cleaned interpretation of learner speech (esp. after Whisper STT).
+_SAID_TAG = re.compile(
+    r"\[\[said:(?P<said>[^\]]+)\]\]",
+    re.IGNORECASE,
+)
+# Pedagogically wrong answer in conversation → comprehension store.
+_WRONG_TAG = re.compile(
+    r"\[\[wrong:(?P<summary>[^|\]]+)(?:\|(?P<note>[^\]]+))?\]\]",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -124,6 +134,36 @@ def parse_confused_tags(text: str) -> tuple[str, list[tuple[str, str]]]:
         return ""
 
     cleaned = _CONFUSED_TAG.sub(_repl, text)
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip(), found
+
+
+def parse_said_tag(text: str) -> tuple[str, str | None]:
+    """Extract [[said:cleaned learner utterance]] (last tag wins)."""
+    said: str | None = None
+
+    def _repl(match: re.Match[str]) -> str:
+        nonlocal said
+        value = (match.group("said") or "").strip()
+        if value:
+            said = value
+        return ""
+
+    cleaned = _SAID_TAG.sub(_repl, text)
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip(), said
+
+
+def parse_wrong_tags(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """Extract [[wrong:expected/summary|optional Slovak tip]] markers."""
+    found: list[tuple[str, str]] = []
+
+    def _repl(match: re.Match[str]) -> str:
+        summary = (match.group("summary") or "").strip()
+        note = (match.group("note") or "").strip()
+        if summary:
+            found.append((summary, note))
+        return ""
+
+    cleaned = _WRONG_TAG.sub(_repl, text)
     return re.sub(r"[ \t]{2,}", " ", cleaned).strip(), found
 
 

@@ -9,8 +9,10 @@ from app.learning_store import (
     LearningStore,
     parse_confused_tags,
     parse_learn_tags,
+    parse_said_tag,
     parse_topic_tag,
     parse_unknown_tags,
+    parse_wrong_tags,
 )
 from app.context_limits import CHAT_HISTORY_MESSAGES_MAX, trim_chat_history
 from app.prompts import conversation_system_prompt, free_debate_system_prompt
@@ -122,11 +124,15 @@ class ConversationEngine:
             scenario=session.scenario,
         )
 
-    def _process_reply(self, session: ConversationSession, reply: str) -> tuple[str, list[tuple[str, str]], list[str], list[tuple[str, str]]]:
+    def _process_reply(
+        self, session: ConversationSession, reply: str
+    ) -> tuple[str, list[tuple[str, str]], list[str], list[tuple[str, str]], str | None, list[tuple[str, str]]]:
         cleaned, unknowns = parse_unknown_tags(reply)
         cleaned, facts = parse_learn_tags(cleaned)
         cleaned, topic = parse_topic_tag(cleaned)
         cleaned, confused = parse_confused_tags(cleaned)
+        cleaned, said = parse_said_tag(cleaned)
+        cleaned, wrongs = parse_wrong_tags(cleaned)
         if topic and not session.suggested_topic:
             session.suggested_topic = topic
             session.topic = topic
@@ -135,9 +141,10 @@ class ConversationEngine:
             session.questions_asked += 1
         self._store_unknowns(session, unknowns)
         self._store_confused(session, confused)
+        self._store_wrongs(session, wrongs)
         if facts:
             session.learned_facts.extend(facts)
-        return cleaned.strip(), unknowns, facts, confused
+        return cleaned.strip(), unknowns, facts, confused, said, wrongs
 
     async def opening_message(self, session: ConversationSession, llm: LLMProvider) -> str:
         system = self._system(session)
@@ -160,19 +167,32 @@ class ConversationEngine:
                 "Ask one in-character question and end with [[ask]]."
             )
         reply = await llm.chat([{"role": "user", "content": starter}], system=system)
-        cleaned, _unknowns, _facts, _confused = self._process_reply(session, reply)
+        cleaned, _u, _f, _c, _said, _w = self._process_reply(session, reply)
         session.history.append({"role": "assistant", "content": cleaned})
         session.opening = cleaned
         return cleaned
 
     async def user_turn(
-        self, session: ConversationSession, llm: LLMProvider, user_text: str
+        self,
+        session: ConversationSession,
+        llm: LLMProvider,
+        user_text: str,
+        *,
+        from_stt: bool = False,
     ) -> dict[str, Any]:
         system = self._system(session)
-        hint = ""
+        stt_note = ""
+        if from_stt:
+            stt_note = (
+                " The user text is a Whisper transcript — fix STT nonsense via [[said:...]] "
+                "and answer the intended meaning."
+            )
         if session.free_debate:
             hint = (
-                "\n(System note: continue the free debate. Follow the learner's interest. "
+                "\n(System note: continue the free debate. Follow the learner's interest."
+                f"{stt_note} "
+                "Always mark [[said:cleaned English]]. "
+                "If the answer content is clearly wrong, mark [[wrong:summary|Slovak tip]]. "
                 "Mark new personal facts with [[learn:...]] and unknown words with "
                 "[[unknown:word|Slovak]]. If they do not understand your question, mark "
                 "[[confused:summary|note]], rephrase simply, and ask again. "
@@ -181,7 +201,11 @@ class ConversationEngine:
         else:
             remaining = max(0, session.min_questions - session.questions_asked)
             hint = (
-                "\n(System note: Stay IN CHARACTER in the agreed scenario. "
+                "\n(System note: Stay IN CHARACTER in the agreed scenario."
+                f"{stt_note} "
+                "Always mark [[said:cleaned English of what they meant]]. "
+                "If answer content is clearly wrong (not STT noise), mark "
+                "[[wrong:summary|Slovak tip]] and briefly correct in parentheses. "
                 "Do NOT meta-teach phrases ('you can say…', 'try saying…'). "
                 "React as your role and push the scene forward with one question. "
                 "If the learner does not understand your question, mark "
@@ -200,14 +224,15 @@ class ConversationEngine:
             [{"role": m["role"], "content": m["content"]} for m in session.history],
             system=system,
         )
-        session.history[-1] = {"role": "user", "content": user_text}
-        cleaned, unknowns, facts, confused = self._process_reply(session, reply)
+        cleaned, unknowns, facts, confused, said, wrongs = self._process_reply(session, reply)
+        display_user = (said or user_text).strip() or user_text
+        session.history[-1] = {"role": "user", "content": display_user}
         session.history.append({"role": "assistant", "content": cleaned})
         session.history = trim_chat_history(
             session.history, max_messages=CHAT_HISTORY_MESSAGES_MAX
         )
 
-        lower = user_text.lower()
+        lower = display_user.lower()
         store = self._store(session)
         for word in list(session.due_words):
             if word.lower() in lower:
@@ -215,8 +240,12 @@ class ConversationEngine:
 
         return {
             "reply": cleaned,
+            "said": said,
+            "transcript_raw": user_text,
+            "transcript_display": display_user,
             "unknowns": [{"word": w, "translation": t} for w, t in unknowns],
             "confused": [{"summary": s, "note": n} for s, n in confused],
+            "wrongs": [{"summary": s, "note": n} for s, n in wrongs],
             "learned_facts": facts,
             "suggested_topic": session.suggested_topic,
             "questions_asked": session.questions_asked,
@@ -261,6 +290,24 @@ class ConversationEngine:
                     tip="Learner did not understand the question — rephrase next time.",
                     context=summary,
                     significance=7,
+                )
+            )
+
+    def _store_wrongs(
+        self, session: ConversationSession, wrongs: list[tuple[str, str]]
+    ) -> None:
+        store = self._store(session)
+        for summary, note in wrongs:
+            store.upsert(
+                LearningItem(
+                    kind="comprehension",
+                    word=summary[:120],
+                    translation_sk=note[:200] if note else "Zlá odpoveď v konverzácii",
+                    level=session.level,
+                    topic=session.topic or ("free_debate" if session.free_debate else ""),
+                    tip=note[:200] if note else "Oprav obsah odpovede pri ďalšom opakovaní.",
+                    context=summary,
+                    significance=8,
                 )
             )
 
