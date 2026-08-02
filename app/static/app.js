@@ -1337,6 +1337,7 @@
         $("chat").innerHTML = "";
         appendChat("assistant", data.reply, { audioBase64: data.audio_base64 });
         updateQuestionProgress(data);
+        loadStats().catch(() => {});
         const due = data.due_words?.length ? `Opakujeme: ${data.due_words.join(", ")}. ` : "";
         const topicHint = data.suggested_topic ? `Návrh témy: ${data.suggested_topic}. ` : "";
         const facts = data.learned_facts?.length
