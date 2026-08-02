@@ -1307,7 +1307,7 @@
       return;
     }
     if (isPttMode() && kind === "conversation") {
-      setStatus("Drž tlačidlo mikrofónu.");
+      setStatus("Ťukni na mikrofón (zelené tlačidlo).");
       return;
     }
     const stream = await navigator.mediaDevices.getUserMedia({
@@ -1598,11 +1598,11 @@
         flushPttAndUpload(ptt).catch((err) => setStatus(err.message, true));
         return;
       }
-      setStatus(`Pauza… o ${left}s odošlem AI. (Znova drž = pokračuj v nahrávaní.)`);
+      setStatus(`Pauza… o ${left}s odošlem AI. (Ťukni znova = pokračuj v nahrávaní.)`);
       left -= 1;
       ptt.pauseTimer = setTimeout(tickPause, 1000);
     };
-    setStatus(`Pauza ${waitSec} s… potom odošlem AI. (Znova drž = pokračuj v nahrávaní.)`);
+    setStatus(`Pauza ${waitSec} s… potom odošlem AI. (Ťukni znova = pokračuj v nahrávaní.)`);
     tickPause();
   }
 
