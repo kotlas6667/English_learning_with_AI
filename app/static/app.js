@@ -1616,7 +1616,7 @@
       // Uvoľni mic hneď — inak iOS nechá oranžový indikátor zapnutý.
       releasePttStream(ptt);
       if (blob.size < 1200) {
-        setStatus("Príliš krátky záznam / ticho — drž mikrofón a hovor jasnejšie.");
+        setStatus("Príliš krátky záznam / ticho — ťukni na mikrofón a hovor jasnejšie.");
         syncPttUi();
         return;
       }
@@ -1895,7 +1895,7 @@
       }
     } catch (err) {
       if (err?.name === "AbortError") {
-        setStatus("AI prerušená — drž mikrofón a hovor.");
+        setStatus("AI prerušená — ťukni na mikrofón a hovor.");
       } else {
         const msg = String(err.message || err);
         if (/session not found/i.test(msg)) {
