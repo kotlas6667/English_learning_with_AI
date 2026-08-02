@@ -700,6 +700,31 @@ body.has-activity-bar .shell {
   cursor: help;
 }
 
+.question-progress {
+  margin: 0 0 0.75rem;
+  padding: 0.45rem 0.75rem;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.92rem;
+  font-weight: 650;
+  color: #134034;
+  background: color-mix(in srgb, var(--accent) 12%, #fff);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
+}
+.question-progress.hidden { display: none !important; }
+.question-progress.is-continue {
+  color: #5a3d10;
+  background: #fff3d6;
+  border-color: #e0c27a;
+}
+.question-progress.is-done {
+  color: #3d4a3d;
+  background: #ecefe8;
+  border-color: var(--line);
+}
+
 .chat {
   display: flex;
   flex-direction: column;

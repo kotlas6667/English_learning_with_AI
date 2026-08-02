@@ -1074,6 +1074,9 @@
     $("comprehensionPanel").classList.toggle("hidden", !debate);
     $("phaseBadge").textContent = phase || mode;
     state.readingPhase = phase;
+    if (mode !== "conversation") {
+      $("questionProgress")?.classList.add("hidden");
+    }
     syncPttUi();
   }
 
@@ -1138,6 +1141,30 @@
       $("explainBtn").classList.add("hidden");
       $("stopExplain").classList.remove("hidden");
       $("debateBtn").classList.remove("hidden");
+    }
+  }
+
+  function updateQuestionProgress(data) {
+    const el = $("questionProgress");
+    if (!el) return;
+    const isConv = state.mode === "conversation";
+    if (!isConv) {
+      el.classList.add("hidden");
+      return;
+    }
+    const asked = Number(data?.questions_asked ?? 0);
+    const target = Number(data?.question_target ?? data?.min_questions ?? 20);
+    const phase = data?.conversation_phase || data?.phase || "active";
+    const awaiting = !!data?.awaiting_continue || phase === "awaiting_continue";
+    el.classList.remove("hidden", "is-continue", "is-done");
+    if (phase === "done") {
+      el.classList.add("is-done");
+      el.textContent = `Hotovo — otázky: ${asked} (cieľ bol ${target})`;
+    } else if (awaiting) {
+      el.classList.add("is-continue");
+      el.textContent = `Otázky: ${asked} / ${target} — AI sa pýta, či chceš pokračovať`;
+    } else {
+      el.textContent = `Otázky: ${asked} / ${target}`;
     }
   }
 
@@ -1259,6 +1286,7 @@
         showPanels(data.mode, data.phase || data.mode);
         $("chat").innerHTML = "";
         appendChat("assistant", data.reply, { audioBase64: data.audio_base64 });
+        updateQuestionProgress(data);
         const due = data.due_words?.length ? `Opakujeme: ${data.due_words.join(", ")}. ` : "";
         const topicHint = data.suggested_topic ? `Návrh témy: ${data.suggested_topic}. ` : "";
         const facts = data.learned_facts?.length
@@ -1267,7 +1295,7 @@
         setStatus(
           data.mode === "free_debate"
             ? `${topicHint}${due}${facts}AI hovorí úvod…`
-            : `${due}Otázky: ${data.questions_asked || 0}/${data.min_questions}`
+            : `${due}Otázky: ${data.questions_asked || 0}/${data.question_target || data.min_questions}`
         );
         if (data.mode === "free_debate" || data.mode === "conversation") {
           if (data.mode === "free_debate") setStatus("AI hovorí úvod…");
@@ -1352,22 +1380,28 @@
         }),
       });
       appendChat("assistant", data.reply, { audioBase64: data.audio_base64 });
+      updateQuestionProgress(data);
       const confusedNote = data.confused?.length
         ? `Zapísané: nerozumel otázke — ${data.confused.map((c) => c.summary).filter(Boolean).join("; ")}. `
         : "";
       const wrongNote = data.wrongs?.length
         ? `Zapísané zlá odpoveď — ${data.wrongs.map((w) => w.summary).filter(Boolean).join("; ")}. `
         : "";
-      if (data.learned_facts?.length) {
-        setStatus(`Zapísané o tebe: ${data.learned_facts.join("; ")}. Otázky: ${data.questions_asked}/${data.min_questions}`);
+      const qLabel = `Otázky: ${data.questions_asked}/${data.question_target || data.min_questions}`;
+      if (data.awaiting_continue || data.phase === "awaiting_continue") {
+        setStatus(`${qLabel} — AI sa pýta, či chceš pokračovať.`);
+      } else if (data.phase === "done") {
+        setStatus(`Lekcia ukončená (${qLabel}). Môžeš spustiť novú.`);
+      } else if (data.learned_facts?.length) {
+        setStatus(`Zapísané o tebe: ${data.learned_facts.join("; ")}. ${qLabel}`);
       } else if (wrongNote) {
-        setStatus(`${wrongNote}Pozri learning store dole.`);
+        setStatus(`${wrongNote}${qLabel}`);
       } else if (confusedNote) {
         setStatus(`${confusedNote}AI to preformuluje.`);
       } else if (state.mode === "free_debate") {
         setStatus("AI odpovedá…");
       } else {
-        setStatus(`Otázky: ${data.questions_asked}/${data.min_questions}`);
+        setStatus(qLabel);
       }
       await loadLearning();
       ptt.processing = false;
@@ -1955,6 +1989,7 @@
         data.transcript_display || data.said || data.transcript || "(audio)";
       appendChat("user", shown);
       appendChat("assistant", data.reply, { audioBase64: data.audio_base64 });
+      updateQuestionProgress(data);
       if ((data.wrongs && data.wrongs.length) || (data.confused && data.confused.length) || (data.unknowns && data.unknowns.length)) {
         loadLearning().catch(() => {});
       }
@@ -1964,14 +1999,19 @@
       const wrongNote = data.wrongs?.length
         ? `Zapísané zlá odpoveď — ${data.wrongs.map((w) => w.summary).filter(Boolean).join("; ")}. `
         : "";
-      if (data.learned_facts?.length) {
-        setStatus(`Zapísané o tebe: ${data.learned_facts.join("; ")}`);
+      const qLabel = `Otázky: ${data.questions_asked}/${data.question_target || data.min_questions}`;
+      if (data.awaiting_continue || data.phase === "awaiting_continue") {
+        setStatus(`${qLabel} — AI sa pýta, či chceš pokračovať.`);
+      } else if (data.phase === "done") {
+        setStatus(`Lekcia ukončená (${qLabel}).`);
+      } else if (data.learned_facts?.length) {
+        setStatus(`Zapísané o tebe: ${data.learned_facts.join("; ")}. ${qLabel}`);
       } else if (wrongNote) {
-        setStatus(`${wrongNote}Pozri learning store dole.`);
+        setStatus(`${wrongNote}${qLabel}`);
       } else if (confusedNote) {
         setStatus(`${confusedNote}AI to preformuluje.`);
       } else {
-        setStatus("AI hovorí…");
+        setStatus(`${qLabel} — AI hovorí…`);
       }
       await loadLearning();
       ptt.processing = false;

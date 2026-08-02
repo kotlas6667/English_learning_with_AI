@@ -7,7 +7,9 @@ from uuid import uuid4
 from app.learning_store import (
     LearningItem,
     LearningStore,
+    parse_ask_continue_tag,
     parse_confused_tags,
+    parse_continue_decision_tag,
     parse_learn_tags,
     parse_said_tag,
     parse_topic_tag,
@@ -33,6 +35,10 @@ class ConversationSession:
     speech_rate: float = 1.0
     min_questions: int = 20
     questions_asked: int = 0
+    question_batch: int = 20
+    question_target: int = 20
+    awaiting_continue: bool = False
+    phase: str = "active"  # active | awaiting_continue | done
     restart: bool = False
     free_debate: bool = False
     suggested_topic: str = ""
@@ -96,6 +102,10 @@ class ConversationEngine:
             tts_provider=tts_provider,
             speech_rate=speech_rate,
             min_questions=max(2, min(80, int(min_questions))),
+            question_batch=max(2, min(80, int(min_questions))),
+            question_target=max(2, min(80, int(min_questions))),
+            awaiting_continue=False,
+            phase="active",
             restart=restart and not free_debate,
             free_debate=free_debate,
             user_context=user_context,
@@ -133,18 +143,41 @@ class ConversationEngine:
         cleaned, confused = parse_confused_tags(cleaned)
         cleaned, said = parse_said_tag(cleaned)
         cleaned, wrongs = parse_wrong_tags(cleaned)
+        cleaned, offered_continue = parse_ask_continue_tag(cleaned)
+        cleaned, continue_decision = parse_continue_decision_tag(cleaned)
         if topic and not session.suggested_topic:
             session.suggested_topic = topic
             session.topic = topic
         cleaned, asked = self._consume_ask_marker(cleaned)
-        if asked:
+        # Continue-offer / goodbye questions do not count toward the quota.
+        if asked and not offered_continue and continue_decision != "no":
             session.questions_asked += 1
+        if offered_continue and not session.free_debate:
+            session.awaiting_continue = True
+            session.phase = "awaiting_continue"
+        if continue_decision == "yes" and not session.free_debate:
+            session.awaiting_continue = False
+            session.phase = "active"
+            session.question_target = session.questions_asked + session.question_batch
+        elif continue_decision == "no" and not session.free_debate:
+            session.awaiting_continue = False
+            session.phase = "done"
         self._store_unknowns(session, unknowns)
         self._store_confused(session, confused)
         self._store_wrongs(session, wrongs)
         if facts:
             session.learned_facts.extend(facts)
         return cleaned.strip(), unknowns, facts, confused, said, wrongs
+
+    def _progress_payload(self, session: ConversationSession) -> dict[str, Any]:
+        return {
+            "questions_asked": session.questions_asked,
+            "min_questions": session.min_questions,
+            "question_batch": session.question_batch,
+            "question_target": session.question_target,
+            "awaiting_continue": session.awaiting_continue,
+            "phase": session.phase,
+        }
 
     async def opening_message(self, session: ConversationSession, llm: LLMProvider) -> str:
         system = self._system(session)
@@ -171,6 +204,59 @@ class ConversationEngine:
         session.history.append({"role": "assistant", "content": cleaned})
         session.opening = cleaned
         return cleaned
+
+    def _roleplay_hint(self, session: ConversationSession, *, from_stt: bool) -> str:
+        stt_note = ""
+        if from_stt:
+            stt_note = (
+                " The user text is a Whisper transcript — fix STT nonsense via [[said:...]] "
+                "and answer the intended meaning."
+            )
+        base = (
+            "\n(System note: Stay IN CHARACTER in the agreed scenario."
+            f"{stt_note} "
+            "Always mark [[said:cleaned English of what they meant]]. "
+            "If answer content is clearly wrong (not STT noise), mark "
+            "[[wrong:summary|Slovak tip]] and briefly correct in parentheses. "
+            "Do NOT meta-teach phrases ('you can say…', 'try saying…'). "
+            "If the learner does not understand your question, mark "
+            "[[confused:summary|note]], rephrase more simply IN CHARACTER, and ask again."
+        )
+        if session.phase == "done":
+            return (
+                base
+                + " The lesson already ended. Thank them briefly IN CHARACTER and tell them "
+                "they can start a new lesson. Do NOT ask new scenario questions. "
+                "Do NOT mark [[ask]] or [[ask_continue]].)"
+            )
+        if session.awaiting_continue or session.phase == "awaiting_continue":
+            return (
+                base
+                + " You already asked whether they want to CONTINUE practicing. "
+                "Interpret their answer. If YES/continue/áno: mark [[continue:yes]], "
+                "then ask ONE fresh in-character question that advances the scene "
+                "(do not repeat earlier questions) and end with [[ask]]. "
+                "If NO/stop/nie/enough: mark [[continue:no]], thank them briefly IN CHARACTER, "
+                "and end the scene — no more questions. Do NOT invent repeated check-in loops.)"
+            )
+        remaining = max(0, session.question_target - session.questions_asked)
+        if remaining <= 0:
+            return (
+                base
+                + f" Question quota reached ({session.questions_asked}/"
+                f"{session.question_target}). This turn: briefly wrap the current beat "
+                "IN CHARACTER, then ask if they want to CONTINUE practicing this conversation "
+                "or STOP. Speak the continue question in simple English. "
+                "Mark [[ask_continue]] (and you may also mark [[ask]]). "
+                "Do NOT ask another passport/ticket/boarding loop question. "
+                "Do NOT invent new repeated tasks.)"
+            )
+        return (
+            base
+            + " React as your role and push the scene forward with ONE new question "
+            f"(about {remaining} more before the continue checkpoint). "
+            "Do not repeat earlier questions. End question turns with [[ask]].)"
+        )
 
     async def user_turn(
         self,
@@ -199,23 +285,7 @@ class ConversationEngine:
                 "End questions with [[ask]].)"
             )
         else:
-            remaining = max(0, session.min_questions - session.questions_asked)
-            hint = (
-                "\n(System note: Stay IN CHARACTER in the agreed scenario."
-                f"{stt_note} "
-                "Always mark [[said:cleaned English of what they meant]]. "
-                "If answer content is clearly wrong (not STT noise), mark "
-                "[[wrong:summary|Slovak tip]] and briefly correct in parentheses. "
-                "Do NOT meta-teach phrases ('you can say…', 'try saying…'). "
-                "React as your role and push the scene forward with one question. "
-                "If the learner does not understand your question, mark "
-                "[[confused:summary|note]], rephrase more simply IN CHARACTER, and ask again. "
-                "End question turns with [[ask]]."
-            )
-            if remaining > 0:
-                hint += f" About {remaining} more in-character questions still needed before wrapping up.)"
-            else:
-                hint += ")"
+            hint = self._roleplay_hint(session, from_stt=from_stt)
         session.history.append({"role": "user", "content": user_text + hint})
         session.history = trim_chat_history(
             session.history, max_messages=CHAT_HISTORY_MESSAGES_MAX
@@ -225,6 +295,16 @@ class ConversationEngine:
             system=system,
         )
         cleaned, unknowns, facts, confused, said, wrongs = self._process_reply(session, reply)
+        # If quota just hit and model forgot to offer continue, keep phase active until next turn
+        # but force awaiting via soft flag when asked count crossed target without offer.
+        if (
+            not session.free_debate
+            and session.phase == "active"
+            and not session.awaiting_continue
+            and session.questions_asked >= session.question_target
+        ):
+            # Next user_turn hint will force [[ask_continue]].
+            pass
         display_user = (said or user_text).strip() or user_text
         session.history[-1] = {"role": "user", "content": display_user}
         session.history.append({"role": "assistant", "content": cleaned})
@@ -248,9 +328,8 @@ class ConversationEngine:
             "wrongs": [{"summary": s, "note": n} for s, n in wrongs],
             "learned_facts": facts,
             "suggested_topic": session.suggested_topic,
-            "questions_asked": session.questions_asked,
-            "min_questions": session.min_questions,
             "free_debate": session.free_debate,
+            **self._progress_payload(session),
         }
 
     def get(self, session_id: str) -> ConversationSession:

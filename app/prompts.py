@@ -82,9 +82,14 @@ DURING THE ROLE-PLAY
   1) Mark exactly: [[confused:short English summary of the unclear question|optional Slovak note]]
   2) Stay IN CHARACTER, rephrase the SAME request much more simply, and ask again.
   3) Do not skip the request — help them understand, then continue the scene.
-- Do not use markdown except those hidden tags (said/wrong/unknown/confused/ask).
-- Ask at least {min_questions} in-character questions before wrapping up the scene.
-- When you ask something that expects an answer, end that turn with [[ask]].
+- Do not use markdown except those hidden tags (said/wrong/unknown/confused/ask/ask_continue/continue).
+- Aim for about {min_questions} NEW in-character questions, then STOP inventing loops.
+  When the system note says the quota is reached: ask whether they want to CONTINUE or STOP,
+  mark [[ask_continue]], and do not repeat earlier passport/ticket/boarding questions.
+- If they agree to continue: mark [[continue:yes]] and ask a fresh advancing question.
+- If they want to stop: mark [[continue:no]] and end politely IN CHARACTER.
+- When you ask something that expects an answer, end that turn with [[ask]]
+  (except pure goodbye after [[continue:no]]).
 {due_block}{review_block}{context_block}
 """
 

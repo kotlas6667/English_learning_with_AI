@@ -32,6 +32,12 @@ _WRONG_TAG = re.compile(
     r"\[\[wrong:(?P<summary>[^|\]]+)(?:\|(?P<note>[^\]]+))?\]\]",
     re.IGNORECASE,
 )
+# Conversation milestone: offer more practice / accept / end.
+_ASK_CONTINUE_TAG = re.compile(r"\[\[ask_continue\]\]", re.IGNORECASE)
+_CONTINUE_DECISION_TAG = re.compile(
+    r"\[\[continue:(?P<decision>yes|no)\]\]",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -165,6 +171,25 @@ def parse_wrong_tags(text: str) -> tuple[str, list[tuple[str, str]]]:
 
     cleaned = _WRONG_TAG.sub(_repl, text)
     return re.sub(r"[ \t]{2,}", " ", cleaned).strip(), found
+
+
+def parse_ask_continue_tag(text: str) -> tuple[str, bool]:
+    found = bool(_ASK_CONTINUE_TAG.search(text))
+    cleaned = _ASK_CONTINUE_TAG.sub("", text)
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip(), found
+
+
+def parse_continue_decision_tag(text: str) -> tuple[str, str | None]:
+    """Extract [[continue:yes]] / [[continue:no]] (last tag wins)."""
+    decision: str | None = None
+
+    def _repl(match: re.Match[str]) -> str:
+        nonlocal decision
+        decision = (match.group("decision") or "").strip().lower() or decision
+        return ""
+
+    cleaned = _CONTINUE_DECISION_TAG.sub(_repl, text)
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip(), decision
 
 
 def _next_interval(times_correct: int) -> int:

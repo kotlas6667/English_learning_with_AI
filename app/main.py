@@ -942,6 +942,10 @@ async def session_start(
             "speech_rate": speech_rate,
             "min_questions": session.min_questions,
             "questions_asked": session.questions_asked,
+            "question_batch": session.question_batch,
+            "question_target": session.question_target,
+            "awaiting_continue": session.awaiting_continue,
+            "conversation_phase": session.phase,
             "restart": body.restart and not free,
             "free_debate": free,
         }
