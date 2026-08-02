@@ -100,6 +100,11 @@ class DeleteLearningRequest(BaseModel):
     user_id: str | None = None
 
 
+class LessonSettingsRequest(BaseModel):
+    settings: dict[str, Any] = Field(default_factory=dict)
+    user_id: str | None = None
+
+
 class PracticeLearningRequest(BaseModel):
     kind: Literal["reading_error", "vocabulary"] = "reading_error"
     user_id: str | None = None
@@ -238,6 +243,7 @@ async def meta(
     default_tts = normalize_tts_provider(settings.tts_provider)
     auth_uid = _optional_user(authorization, x_session_token)
     topics: list[dict[str, Any]] = []
+    lesson_settings: dict[str, str] = {}
     uid = auth_uid
     is_admin = False
     if auth_uid:
@@ -246,15 +252,19 @@ async def meta(
             is_admin = actor.is_admin()
             uid = _resolve_user_id(user_id, auth_uid=auth_uid) if user_id else auth_uid
             topics = users.topics(uid).list_topics()
+            lesson_settings = users.settings(uid).read()
             users.set_active_user(uid)
         except (KeyError, HTTPException):
             uid = auth_uid
             try:
                 topics = users.topics(auth_uid).list_topics()
+                lesson_settings = users.settings(auth_uid).read()
             except KeyError:
                 topics = []
+                lesson_settings = {}
     return {
         "topics": topics,
+        "lesson_settings": lesson_settings,
         "levels": list(LEVELS),
         "llm_providers": settings.available_llm_providers(),
         "llm_options": options,
@@ -389,6 +399,29 @@ async def get_topics(
     auth_uid = _require_user(authorization, x_session_token)
     uid = _resolve_user_id(user_id, auth_uid=auth_uid)
     return {"user_id": uid, "topics": users.topics(uid).list_topics()}
+
+
+@app.get("/api/settings")
+async def get_lesson_settings(
+    user_id: str | None = None,
+    authorization: str | None = Header(None),
+    x_session_token: str | None = Header(None),
+) -> dict[str, Any]:
+    auth_uid = _require_user(authorization, x_session_token)
+    uid = _resolve_user_id(user_id, auth_uid=auth_uid)
+    return {"user_id": uid, "settings": users.settings(uid).read()}
+
+
+@app.put("/api/settings")
+async def put_lesson_settings(
+    body: LessonSettingsRequest,
+    authorization: str | None = Header(None),
+    x_session_token: str | None = Header(None),
+) -> dict[str, Any]:
+    auth_uid = _require_user(authorization, x_session_token)
+    uid = _resolve_user_id(body.user_id, auth_uid=auth_uid)
+    saved = users.settings(uid).write(body.settings or {})
+    return {"user_id": uid, "settings": saved}
 
 
 async def _llm_semantic_topic_check(

@@ -159,6 +159,10 @@ class UserManager:
             json.dumps({"topics": {}}, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        (udir / "settings.json").write_text(
+            json.dumps({}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
         return user
 
     def _default_profile(self, user: User) -> str:
@@ -480,3 +484,9 @@ class UserManager:
 
         self.get_user(user_id)
         return UserTopicsStore(self._user_dir(user_id))
+
+    def settings(self, user_id: str):
+        from app.user_settings import UserSettingsStore
+
+        self.get_user(user_id)
+        return UserSettingsStore(self._user_dir(user_id))

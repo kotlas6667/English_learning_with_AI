@@ -587,6 +587,9 @@
     showAuthGate();
   }
 
+  let settingsPersistTimer = null;
+  let settingsPersistInFlight = null;
+
   function settingsStorageKey(userId) {
     const uid = userId || effectiveUserId() || state.userId;
     return uid ? `${SETTINGS_KEY}:${uid}` : SETTINGS_KEY;
@@ -612,17 +615,60 @@
     }
   }
 
-  function saveLessonSettings() {
-    const uid = effectiveUserId() || state.userId;
-    if (!uid) return;
+  function writeLessonSettingsLocal(data, userId) {
+    const uid = userId || effectiveUserId() || state.userId;
+    if (!uid || !data) return;
+    try {
+      localStorage.setItem(settingsStorageKey(uid), JSON.stringify(data));
+    } catch (_) {}
+  }
+
+  function collectLessonSettings() {
     const data = {};
     for (const id of SETTINGS_FIELDS) {
       const el = $(id);
       if (el && el.value != null && el.value !== "") data[id] = el.value;
     }
+    return data;
+  }
+
+  function saveLessonSettings() {
+    const uid = effectiveUserId() || state.userId;
+    if (!uid) return;
+    const data = collectLessonSettings();
+    writeLessonSettingsLocal(data, uid);
+    schedulePersistLessonSettings(data, uid);
+  }
+
+  function schedulePersistLessonSettings(data, userId) {
+    const uid = userId || effectiveUserId() || state.userId;
+    if (!uid || !state.token) return;
+    if (settingsPersistTimer) clearTimeout(settingsPersistTimer);
+    settingsPersistTimer = setTimeout(() => {
+      settingsPersistTimer = null;
+      persistLessonSettings(data, uid).catch(() => {});
+    }, 350);
+  }
+
+  async function persistLessonSettings(data, userId) {
+    const uid = userId || effectiveUserId() || state.userId;
+    if (!uid || !state.token) return null;
+    const payload = data || collectLessonSettings();
+    const req = api("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: uid, settings: payload }),
+    });
+    settingsPersistInFlight = req;
     try {
-      localStorage.setItem(settingsStorageKey(uid), JSON.stringify(data));
-    } catch (_) {}
+      const res = await req;
+      const saved = res?.settings && typeof res.settings === "object" ? res.settings : payload;
+      writeLessonSettingsLocal(saved, uid);
+      if (state.meta) state.meta.lesson_settings = saved;
+      return saved;
+    } finally {
+      if (settingsPersistInFlight === req) settingsPersistInFlight = null;
+    }
   }
 
   function clearLessonSettings(userId) {
@@ -630,6 +676,13 @@
     try {
       localStorage.removeItem(settingsStorageKey(userId));
     } catch (_) {}
+  }
+
+  function mergeLessonSettingsPrefs(serverPrefs, localPrefs) {
+    const server = serverPrefs && typeof serverPrefs === "object" ? serverPrefs : {};
+    const local = localPrefs && typeof localPrefs === "object" ? localPrefs : {};
+    if (Object.keys(server).length) return { ...local, ...server };
+    return { ...local };
   }
 
   function applySelectValue(id, value) {
@@ -830,7 +883,18 @@
     fillSelect($("silenceTimeout"), silenceOpts);
     $("silenceTimeout").value = String(state.meta.default_silence_timeout || 3);
     if (!$("silenceTimeout").value) $("silenceTimeout").value = "3";
-    applyLessonSettings();
+
+    const localPrefs = readLessonSettings(uid || undefined);
+    const serverPrefs = state.meta.lesson_settings || {};
+    const prefs = mergeLessonSettingsPrefs(serverPrefs, localPrefs);
+    applyLessonSettings(prefs);
+    if (Object.keys(prefs).length) {
+      writeLessonSettingsLocal(prefs, uid || undefined);
+      // Migrate browser-only prefs to server when file is still empty.
+      if (!Object.keys(serverPrefs).length && Object.keys(localPrefs).length) {
+        schedulePersistLessonSettings(prefs, uid || undefined);
+      }
+    }
     syncModeUi();
   }
 
@@ -861,7 +925,8 @@
           : state.meta.default_voice_id;
       if (preferred) $("voice").value = preferred;
       if (!$("voice").value && voices[0]) $("voice").value = voices[0].voice_id;
-      applySelectValue("voice", readLessonSettings().voice);
+      const voicePrefs = mergeLessonSettingsPrefs(state.meta?.lesson_settings, readLessonSettings());
+      applySelectValue("voice", voicePrefs.voice);
     } catch (err) {
       $("voice").innerHTML = "";
       const opt = document.createElement("option");
@@ -870,7 +935,8 @@
         ? "Default (nastav ELEVENLABS_API_KEY)"
         : "Default Edge voice";
       $("voice").appendChild(opt);
-      applySelectValue("voice", readLessonSettings().voice);
+      const voicePrefs = mergeLessonSettingsPrefs(state.meta?.lesson_settings, readLessonSettings());
+      applySelectValue("voice", voicePrefs.voice);
       setStatus(err.message, true);
     }
   }
