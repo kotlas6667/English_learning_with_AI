@@ -100,10 +100,14 @@ data/
     vocabulary.md
     reading_errors.md
     comprehension.md
+    question_gaps.md
     topics.json           # témy/podtémy daného používateľa
+    settings.json         # nastavenia lekcie (UI) — prežijú refresh aj rebuild
 ```
 
 **Poznámka Docker:** `DATA_DIR` v `.env` často `/app/data` (volume). Lokálne môže byť `data/`. Pri debugovaní vždy skontroluj `get_settings().data_dir`.
+
+**HAOS deploy:** `docker cp` je dočasné. Trvalo: `scripts/haos-full-deploy.sh` (sync kódu do `/share`, `docker build`, volume na host `.../data`). Nastavenia = JSON vo volume, **SQLite netreba**.
 
 ---
 
@@ -120,8 +124,10 @@ data/
 | `app/prompts.py` | systémové / generation / judge prompty |
 | `app/learning_store.py` | MD store + parsovanie `[[unknown:]]`, `[[learn:]]`, `[[topic:]]` |
 | `app/user_topics.py` | témy per user + detekcia duplicít |
+| `app/user_settings.py` | `settings.json` — preferencie lekcie |
 | `app/voice/` | Edge / ElevenLabs TTS, Whisper STT, rýchlosť |
 | `app/static/*` | UI |
+| `scripts/haos-full-deploy.sh` | plný rebuild na HAOS so zachovaním data/ |
 | `docker-compose.yml`, `Dockerfile`, `.env.example` | deploy |
 
 ---
