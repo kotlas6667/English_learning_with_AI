@@ -129,9 +129,19 @@ class ConversationEngine:
                 self._stores.pop(sid, None)
         return closed
 
+    def abandon_session(self, session_id: str) -> ConversationSession | None:
+        """Drop session without counting it in stats (discard / cancel)."""
+        session = self.sessions.pop(session_id, None)
+        self._stores.pop(session_id, None)
+        if not session:
+            return None
+        session.stats_recorded = True  # skip future finalize
+        session.phase = "abandoned"
+        return session
+
     def conversation_stats_entry(self, session: ConversationSession) -> dict[str, Any] | None:
         """Build a stats record if the session had real practice."""
-        if session.stats_recorded:
+        if session.stats_recorded or session.phase == "abandoned":
             return None
         user_turns = sum(1 for m in session.history if m.get("role") == "user")
         if user_turns <= 0 and session.questions_asked <= 0:

@@ -1664,6 +1664,51 @@
       ptt.abortController = null;
     }
     if (ptt) ptt.processing = false;
+    syncPttUi();
+  }
+
+  function clearLessonUi() {
+    state.sessionId = null;
+    state.mode = null;
+    state.lastStartPayload = null;
+    state.passageText = "";
+    state.passageAudio = null;
+    state.isPractice = false;
+    const chat = $("chat");
+    if (chat) chat.innerHTML = "";
+    $("questionProgress")?.classList.add("hidden");
+    $("lesson")?.classList.add("hidden");
+    $("conversationPanel")?.classList.add("hidden");
+    $("readingPanel")?.classList.add("hidden");
+    $("comprehensionPanel")?.classList.add("hidden");
+  }
+
+  async function abandonCurrentLesson() {
+    if (!state.sessionId) {
+      clearLessonUi();
+      setStatus("Žiadna aktívna lekcia.");
+      return;
+    }
+    if (!confirm("Naozaj zrušiť lekciu? Nebude v štatistikách a nedá sa k nej vrátiť.")) {
+      return;
+    }
+    const sid = state.sessionId;
+    interruptAiSpeech();
+    await stopPtt().catch(() => {});
+    try {
+      await api("/api/session/abandon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sid }),
+      });
+    } catch (err) {
+      // Aj pri chybe vyčisti UI — session často už neexistuje.
+      setStatus(err.message || String(err), true);
+    }
+    clearLessonUi();
+    syncPttUi();
+    await loadStats().catch(() => {});
+    setStatus("Lekcia zrušená — bez zápisu do štatistík.");
   }
 
   function clearPttPauseTimer() {
@@ -2594,6 +2639,13 @@
   $("startBtn").addEventListener("click", () => startLesson(false));
   $("freeDebateBtn").addEventListener("click", () => startLesson(false, "free_debate"));
   $("restartBtn").addEventListener("click", () => startLesson(true));
+  $("interruptLessonBtn")?.addEventListener("click", () => {
+    interruptAiSpeech();
+    setStatus("AI prerušená — môžeš pokračovať alebo zrušiť lekciu.");
+  });
+  $("abandonLessonBtn")?.addEventListener("click", () => {
+    abandonCurrentLesson().catch((e) => setStatus(e.message, true));
+  });
   $("refreshLearning").addEventListener("click", () => loadLearning().catch((e) => setStatus(e.message, true)));
   $("practiceOpenBtn").addEventListener("click", openPracticePanel);
   $("practiceCancelBtn").addEventListener("click", closePracticePanel);

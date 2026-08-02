@@ -899,6 +899,40 @@ def _finalize_closed_conversations(user_id: str) -> None:
             pass
 
 
+@app.post("/api/session/abandon")
+async def session_abandon(
+    body: SessionIdBody,
+    authorization: str | None = Header(None),
+    x_session_token: str | None = Header(None),
+) -> dict[str, Any]:
+    """Zruší lekciu bez zápisu do štatistík a bez návratu."""
+    auth_uid = _require_user(authorization, x_session_token)
+    sid = (body.session_id or "").strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="Chýba session_id.")
+
+    mode = "conversation"
+    try:
+        existing = conversation_engine.get(sid)
+    except KeyError:
+        try:
+            existing = reading_engine.get(sid)
+            mode = "reading"
+        except KeyError:
+            return {"ok": True, "abandoned": True, "session_id": sid, "mode": None}
+
+    _assert_session_owner(existing.user_id, auth_uid)
+    if mode == "conversation":
+        conversation_engine.abandon_session(sid)
+    else:
+        reading_engine.abandon_session(sid)
+    users.append_history(
+        existing.user_id,
+        f"**ABANDONED {mode}** · session zrušená bez štatistík",
+    )
+    return {"ok": True, "abandoned": True, "session_id": sid, "mode": mode}
+
+
 @app.post("/api/session/start")
 async def session_start(
     body: StartRequest,

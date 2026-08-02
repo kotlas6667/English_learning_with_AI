@@ -207,8 +207,18 @@
 
     <section id="lesson" class="lesson hidden">
       <div class="lesson-head">
-        <h2 id="lessonTitle">Lekcia</h2>
-        <span id="phaseBadge" class="badge"></span>
+        <div class="lesson-head-main">
+          <h2 id="lessonTitle">Lekcia</h2>
+          <span id="phaseBadge" class="badge"></span>
+        </div>
+        <div class="lesson-head-actions">
+          <button id="interruptLessonBtn" type="button" class="ghost" title="Zastaví AI hlas / spracovanie">
+            Prerušiť AI
+          </button>
+          <button id="abandonLessonBtn" type="button" class="danger" title="Úplne zruší lekciu — bez štatistík">
+            Zrušiť lekciu
+          </button>
+        </div>
       </div>
 
       <article id="readingPanel" class="hidden">
@@ -381,6 +391,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=41"></script>
+  <script src="/static/app.js?v=42"></script>
 </body>
 </html>

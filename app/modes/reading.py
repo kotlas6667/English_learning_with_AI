@@ -440,3 +440,6 @@ class ReadingEngine:
         if not session:
             raise KeyError("Reading session not found")
         return session
+
+    def abandon_session(self, session_id: str) -> ReadingSession | None:
+        return self.sessions.pop(session_id, None)
