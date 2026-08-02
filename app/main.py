@@ -424,6 +424,17 @@ async def put_lesson_settings(
     return {"user_id": uid, "settings": saved}
 
 
+@app.get("/api/stats")
+async def get_user_stats(
+    user_id: str | None = None,
+    authorization: str | None = Header(None),
+    x_session_token: str | None = Header(None),
+) -> dict[str, Any]:
+    auth_uid = _require_user(authorization, x_session_token)
+    uid = _resolve_user_id(user_id, auth_uid=auth_uid)
+    return {"user_id": uid, **users.stats(uid).summary()}
+
+
 async def _llm_semantic_topic_check(
     *,
     label: str,
@@ -859,6 +870,35 @@ def _finish_previous_session_notes(
     )
 
 
+def _record_conversation_stats(session) -> dict[str, Any] | None:
+    """Persist one conversation into users/<id>/stats.json (once)."""
+    entry = conversation_engine.conversation_stats_entry(session)
+    if not entry:
+        return None
+    ended_at = entry.pop("ended_at", None)
+    summary = users.stats(session.user_id).record_conversation(
+        ended_at=ended_at,
+        **entry,
+    )
+    session.stats_recorded = True
+    mins = max(1, int(round(entry["duration_sec"] / 60))) if entry["duration_sec"] else 0
+    users.append_history(
+        session.user_id,
+        f"**END conversation** · {entry.get('topic')} · "
+        f"questions={entry['questions']} · wrongs={entry['wrongs']} · "
+        f"~{mins} min · continued={entry['continued']} · completed={entry['completed']}",
+    )
+    return summary
+
+
+def _finalize_closed_conversations(user_id: str) -> None:
+    for old in conversation_engine.close_user_sessions(user_id):
+        try:
+            _record_conversation_stats(old)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 @app.post("/api/session/start")
 async def session_start(
     body: StartRequest,
@@ -890,6 +930,7 @@ async def session_start(
 
     if body.mode in ("conversation", "free_debate"):
         free = body.mode == "free_debate"
+        _finalize_closed_conversations(uid)
         session = conversation_engine.start(
             store=store,
             user_id=uid,
@@ -1087,10 +1128,16 @@ async def conversation_turn(
     facts = list(result.get("learned_facts") or [])
     display = (result.get("transcript_display") or result.get("said") or raw_text).strip()
     added = _log_conversation_turn(session, display, result["reply"], facts=facts)
+    stats_summary = None
+    if result.get("phase") == "done":
+        stats_summary = _record_conversation_stats(session)
     audio_b64 = await _speak_required(
         result["reply"], session.voice_id, session.tts_provider, speech_rate
     )
-    return {**result, "audio_base64": audio_b64, "learned_facts": added, "speech_rate": speech_rate}
+    out = {**result, "audio_base64": audio_b64, "learned_facts": added, "speech_rate": speech_rate}
+    if stats_summary:
+        out["stats"] = stats_summary
+    return out
 
 
 @app.post("/api/conversation/utterance")
@@ -1130,10 +1177,13 @@ async def conversation_utterance(
     facts = list(result.get("learned_facts") or [])
     display = (result.get("transcript_display") or result.get("said") or transcript).strip()
     added = _log_conversation_turn(session, display, result["reply"], facts=facts)
+    stats_summary = None
+    if result.get("phase") == "done":
+        stats_summary = _record_conversation_stats(session)
     audio_b64 = await _speak_required(
         result["reply"], session.voice_id, session.tts_provider, rate
     )
-    return {
+    out = {
         **result,
         "transcript": display,
         "transcript_raw": transcript,
@@ -1142,6 +1192,9 @@ async def conversation_utterance(
         "speech_rate": rate,
         "no_speech": False,
     }
+    if stats_summary:
+        out["stats"] = stats_summary
+    return out
 
 
 @app.post("/api/reading/begin")

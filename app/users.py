@@ -163,6 +163,12 @@ class UserManager:
             json.dumps({}, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        from app.user_stats import empty_stats
+
+        (udir / "stats.json").write_text(
+            json.dumps(empty_stats(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
         return user
 
     def _default_profile(self, user: User) -> str:
@@ -490,3 +496,9 @@ class UserManager:
 
         self.get_user(user_id)
         return UserSettingsStore(self._user_dir(user_id))
+
+    def stats(self, user_id: str):
+        from app.user_stats import UserStatsStore
+
+        self.get_user(user_id)
+        return UserStatsStore(self._user_dir(user_id))

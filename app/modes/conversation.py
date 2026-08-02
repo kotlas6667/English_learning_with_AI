@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
@@ -48,6 +49,12 @@ class ConversationSession:
     due_words: list[str] = field(default_factory=list)
     opening: str = ""
     learned_facts: list[str] = field(default_factory=list)
+    started_at: datetime = field(default_factory=datetime.now)
+    wrongs_count: int = 0
+    unknowns_count: int = 0
+    confused_count: int = 0
+    continued_once: bool = False
+    stats_recorded: bool = False
 
 
 class ConversationEngine:
@@ -85,11 +92,6 @@ class ConversationEngine:
     ) -> ConversationSession:
         due = store.list_due(limit=8, kinds=["vocabulary", "reading_error"])
         due_words = [i.word for i in due]
-        # Jedna aktívna konverzácia na používateľa — staré in-memory sessiony zmaž.
-        for sid, old in list(self.sessions.items()):
-            if old.user_id == user_id:
-                self.sessions.pop(sid, None)
-                self._stores.pop(sid, None)
         session = ConversationSession(
             id=str(uuid4()),
             user_id=user_id,
@@ -111,10 +113,43 @@ class ConversationEngine:
             user_context=user_context,
             scenario=scenario if not free_debate else "Open free debate",
             due_words=due_words,
+            started_at=datetime.now(),
         )
         self.sessions[session.id] = session
         self.bind_store(session.id, store)
         return session
+
+    def close_user_sessions(self, user_id: str) -> list[ConversationSession]:
+        """Remove in-memory sessions for user and return them (for stats finalize)."""
+        closed: list[ConversationSession] = []
+        for sid, old in list(self.sessions.items()):
+            if old.user_id == user_id:
+                closed.append(old)
+                self.sessions.pop(sid, None)
+                self._stores.pop(sid, None)
+        return closed
+
+    def conversation_stats_entry(self, session: ConversationSession) -> dict[str, Any] | None:
+        """Build a stats record if the session had real practice."""
+        if session.stats_recorded:
+            return None
+        user_turns = sum(1 for m in session.history if m.get("role") == "user")
+        if user_turns <= 0 and session.questions_asked <= 0:
+            return None
+        ended = datetime.now()
+        duration = max(0, int((ended - session.started_at).total_seconds()))
+        completed = session.phase == "done" or session.questions_asked >= session.question_batch
+        return {
+            "duration_sec": duration,
+            "questions": session.questions_asked,
+            "wrongs": session.wrongs_count,
+            "completed": completed,
+            "continued": session.continued_once,
+            "topic": session.suggested_topic or session.topic,
+            "level": session.level,
+            "free_debate": session.free_debate,
+            "ended_at": ended,
+        }
 
     def _system(self, session: ConversationSession) -> str:
         if session.free_debate:
@@ -158,6 +193,7 @@ class ConversationEngine:
         if continue_decision == "yes" and not session.free_debate:
             session.awaiting_continue = False
             session.phase = "active"
+            session.continued_once = True
             session.question_target = session.questions_asked + session.question_batch
         elif continue_decision == "no" and not session.free_debate:
             session.awaiting_continue = False
@@ -165,6 +201,9 @@ class ConversationEngine:
         self._store_unknowns(session, unknowns)
         self._store_confused(session, confused)
         self._store_wrongs(session, wrongs)
+        session.unknowns_count += len(unknowns)
+        session.confused_count += len(confused)
+        session.wrongs_count += len(wrongs)
         if facts:
             session.learned_facts.extend(facts)
         return cleaned.strip(), unknowns, facts, confused, said, wrongs

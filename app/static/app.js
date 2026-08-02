@@ -951,6 +951,56 @@
     return map[kind] || kind;
   }
 
+  function formatDuration(sec) {
+    const s = Math.max(0, Number(sec) || 0);
+    if (s < 60) return `${s}s`;
+    const m = Math.round(s / 60);
+    if (m < 60) return `${m} min`;
+    const h = Math.floor(m / 60);
+    const rem = m % 60;
+    return rem ? `${h} h ${rem} min` : `${h} h`;
+  }
+
+  function renderStats(payload) {
+    const grid = $("statsGrid");
+    const recentEl = $("statsRecent");
+    if (!grid || !recentEl) return;
+    const c = payload?.conversation || {};
+    const metrics = [
+      ["Konverzácie", String(c.total || 0)],
+      ["Séria dní", `${c.streak_days || 0} (max ${c.best_streak_days || 0})`],
+      ["Úspešnosť", `${c.success_rate ?? 0}%`],
+      ["Čas spolu", formatDuration(c.total_seconds || 0)],
+      ["Otázky", String(c.total_questions || 0)],
+      ["Zlé odpovede", String(c.total_wrongs || 0)],
+    ];
+    grid.innerHTML = metrics
+      .map(
+        ([label, value]) =>
+          `<div class="stats-metric"><strong>${escapeHtml(value)}</strong><span>${escapeHtml(label)}</span></div>`
+      )
+      .join("");
+
+    const recent = Array.isArray(c.recent) ? c.recent.slice(0, 8) : [];
+    if (!recent.length) {
+      recentEl.innerHTML = `<p class="muted">Zatiaľ žiadne ukončené konverzácie — po lekcii sa tu objavia.</p>`;
+      return;
+    }
+    recentEl.innerHTML = recent
+      .map((r) => {
+        const when = String(r.ended_at || "").replace("T", " ").slice(0, 16);
+        const topic = r.free_debate ? "voľná debata" : r.topic || "konverzácia";
+        const right = `${r.questions || 0} ot. · ${r.success_rate ?? 0}% · ${formatDuration(r.duration_sec)}`;
+        return `<div class="stats-recent-row"><div><strong>${escapeHtml(topic)}</strong> <span class="stats-recent-meta">${escapeHtml(when)} · ${escapeHtml(r.level || "")}</span></div><div class="stats-recent-meta">${escapeHtml(right)}</div></div>`;
+      })
+      .join("");
+  }
+
+  async function loadStats() {
+    const data = await api(`/api/stats?user_id=${encodeURIComponent(effectiveUserId() || "")}`);
+    renderStats(data);
+  }
+
   async function loadLearning() {
     const data = await api(`/api/learning?user_id=${encodeURIComponent(effectiveUserId() || "")}`);
     const dueWords = (data.due || []).map((d) => (typeof d === "string" ? d : d.word)).filter(Boolean);
@@ -1404,6 +1454,8 @@
         setStatus(qLabel);
       }
       await loadLearning();
+      if (data.stats) renderStats(data.stats);
+      else if (data.phase === "done") await loadStats().catch(() => {});
       ptt.processing = false;
       syncPttUi();
       await playBase64Mp3(data.audio_base64);
@@ -2014,6 +2066,8 @@
         setStatus(`${qLabel} — AI hovorí…`);
       }
       await loadLearning();
+      if (data.stats) renderStats(data.stats);
+      else if (data.phase === "done") await loadStats().catch(() => {});
       ptt.processing = false;
       syncPttUi();
       await unlockAudioPlayback();
@@ -2496,6 +2550,7 @@
     await loadMeta();
     await loadVoices();
     await loadLearning();
+    await loadStats().catch(() => {});
     const health = await api("/api/health");
     if (!health.llm_providers.length) {
       setStatus("Chýba LLM API kľúč (OpenAI / Gemini / Mistral). Edge TTS funguje bez kľúča.", true);
@@ -2580,6 +2635,7 @@
       await loadMeta();
       await loadVoices();
       await loadLearning();
+      await loadStats().catch(() => {});
       const label = $("manageUserSelect").selectedOptions[0]?.textContent || state.managedUserId;
       setStatus(`Spravuješ účet: ${label}`);
     } catch (err) {
