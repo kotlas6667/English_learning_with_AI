@@ -7,13 +7,15 @@
 
 set -euo pipefail
 
+# Prefer dedicated v2 repo; fall back to branch "v2" on the original repo.
 BRANCH="${BRANCH:-main}"
+SOURCE_REPO="${SOURCE_REPO:-kotlas6667/English_learning_with_AI_v2}"
 PROJECT_DIR="${PROJECT_DIR:-/share/English_learning_with_AI}"
 CONTAINER="${CONTAINER:-englearning}"
 IMAGE="${IMAGE:-englearning:latest}"
 HOST_DATA="${HOST_DATA:-/mnt/data/supervisor/share/English_learning_with_AI/data}"
 HOST_PORT="${HOST_PORT:-8080}"
-REPO_TGZ_URL="${REPO_TGZ_URL:-https://codeload.github.com/kotlas6667/English_learning_with_AI_v2/tar.gz/${BRANCH}}"
+REPO_TGZ_URL="${REPO_TGZ_URL:-https://codeload.github.com/${SOURCE_REPO}/tar.gz/${BRANCH}}"
 
 # Old v1 leftovers to remove when replacing.
 OLD_CONTAINERS=(englearning englearning-v2)
