@@ -42,6 +42,36 @@ def compute_success_rate(*, questions: int, wrongs: int) -> float:
     return round(100.0 * ok / questions, 1)
 
 
+def _clamp_skill(value: float) -> int:
+    return max(0, min(100, int(round(value))))
+
+
+def compute_skills(
+    *,
+    total_seconds: int,
+    total_questions: int,
+    total_wrongs: int,
+) -> dict[str, int]:
+    """Simple 0–100 heuristics from conversation aggregates."""
+    minutes = max(0.0, total_seconds / 60.0)
+    questions = max(0, total_questions)
+    wrongs = max(0, total_wrongs)
+    success = compute_success_rate(questions=questions, wrongs=wrongs)
+    # Speaking: more talk time + more answered questions → higher (soft ramp).
+    speaking = _clamp_skill(minutes * 4.0 + questions * 1.5) if (minutes or questions) else 0
+    accuracy = _clamp_skill(success)
+    if questions <= 0:
+        vocabulary = 50
+    else:
+        # Inverse of wrong rate; empty practice stays at neutral 50.
+        vocabulary = _clamp_skill(100.0 * (1.0 - (wrongs / questions)))
+    return {
+        "speaking": speaking,
+        "vocabulary": vocabulary,
+        "accuracy": accuracy,
+    }
+
+
 def apply_streak(conv: dict[str, Any], day: date) -> None:
     last = _parse_day(str(conv.get("last_date") or ""))
     if last == day:
@@ -56,6 +86,20 @@ def apply_streak(conv: dict[str, Any], day: date) -> None:
         int(conv.get("streak_days") or 0),
     )
     conv["last_date"] = day.isoformat()
+
+
+def compute_today_minutes(recent: list[Any], *, today: date | None = None) -> float:
+    """Sum duration of sessions that ended on the given local calendar day."""
+    day = today or date.today()
+    total_sec = 0
+    for entry in recent or []:
+        if not isinstance(entry, dict):
+            continue
+        ended = _parse_day(str(entry.get("ended_at") or ""))
+        if ended != day:
+            continue
+        total_sec += max(0, int(entry.get("duration_sec") or 0))
+    return round(total_sec / 60.0, 1)
 
 
 class UserStatsStore:
@@ -105,7 +149,13 @@ class UserStatsStore:
                 **conv,
                 "success_rate": compute_success_rate(questions=questions, wrongs=wrongs),
                 "total_minutes": round(seconds / 60.0, 1),
-            }
+                "today_minutes": compute_today_minutes(list(conv.get("recent") or [])),
+            },
+            "skills": compute_skills(
+                total_seconds=seconds,
+                total_questions=questions,
+                total_wrongs=wrongs,
+            ),
         }
 
     def record_conversation(

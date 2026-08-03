@@ -9,10 +9,13 @@ from app.learning_store import (
     LearningItem,
     LearningStore,
     parse_ask_continue_tag,
+    parse_better_tag,
     parse_confused_tags,
     parse_continue_decision_tag,
     parse_learn_tags,
     parse_said_tag,
+    parse_score_tag,
+    parse_tip_tag,
     parse_topic_tag,
     parse_unknown_tags,
     parse_wrong_tags,
@@ -20,6 +23,7 @@ from app.learning_store import (
 from app.context_limits import CHAT_HISTORY_MESSAGES_MAX, trim_chat_history
 from app.prompts import conversation_system_prompt, free_debate_system_prompt
 from app.providers.base import LLMProvider
+from app.user_stats import compute_success_rate
 
 
 @dataclass
@@ -45,6 +49,7 @@ class ConversationSession:
     suggested_topic: str = ""
     user_context: str = ""
     scenario: str = ""
+    scenario_id: str | None = None
     history: list[dict[str, str]] = field(default_factory=list)
     due_words: list[str] = field(default_factory=list)
     opening: str = ""
@@ -89,6 +94,7 @@ class ConversationEngine:
         free_debate: bool = False,
         user_context: str = "",
         scenario: str = "",
+        scenario_id: str | None = None,
     ) -> ConversationSession:
         due = store.list_due(limit=8, kinds=["vocabulary", "reading_error"])
         due_words = [i.word for i in due]
@@ -112,6 +118,7 @@ class ConversationEngine:
             free_debate=free_debate,
             user_context=user_context,
             scenario=scenario if not free_debate else "Open free debate",
+            scenario_id=None if free_debate else scenario_id,
             due_words=due_words,
             started_at=datetime.now(),
         )
@@ -181,13 +188,26 @@ class ConversationEngine:
 
     def _process_reply(
         self, session: ConversationSession, reply: str
-    ) -> tuple[str, list[tuple[str, str]], list[str], list[tuple[str, str]], str | None, list[tuple[str, str]]]:
+    ) -> tuple[
+        str,
+        list[tuple[str, str]],
+        list[str],
+        list[tuple[str, str]],
+        str | None,
+        list[tuple[str, str]],
+        str | None,
+        str | None,
+        int | None,
+    ]:
         cleaned, unknowns = parse_unknown_tags(reply)
         cleaned, facts = parse_learn_tags(cleaned)
         cleaned, topic = parse_topic_tag(cleaned)
         cleaned, confused = parse_confused_tags(cleaned)
         cleaned, said = parse_said_tag(cleaned)
         cleaned, wrongs = parse_wrong_tags(cleaned)
+        cleaned, better = parse_better_tag(cleaned)
+        cleaned, tip = parse_tip_tag(cleaned)
+        cleaned, speak_score = parse_score_tag(cleaned)
         cleaned, offered_continue = parse_ask_continue_tag(cleaned)
         cleaned, continue_decision = parse_continue_decision_tag(cleaned)
         if topic and not session.suggested_topic:
@@ -216,7 +236,7 @@ class ConversationEngine:
         session.wrongs_count += len(wrongs)
         if facts:
             session.learned_facts.extend(facts)
-        return cleaned.strip(), unknowns, facts, confused, said, wrongs
+        return cleaned.strip(), unknowns, facts, confused, said, wrongs, better, tip, speak_score
 
     def _progress_payload(self, session: ConversationSession) -> dict[str, Any]:
         return {
@@ -226,6 +246,20 @@ class ConversationEngine:
             "question_target": session.question_target,
             "awaiting_continue": session.awaiting_continue,
             "phase": session.phase,
+        }
+
+    def _recap_payload(self, session: ConversationSession) -> dict[str, Any]:
+        return {
+            "questions_asked": session.questions_asked,
+            "wrongs_count": session.wrongs_count,
+            "unknowns_count": session.unknowns_count,
+            "confused_count": session.confused_count,
+            "success_rate": compute_success_rate(
+                questions=session.questions_asked, wrongs=session.wrongs_count
+            ),
+            "continued_once": session.continued_once,
+            "topic": session.suggested_topic or session.topic,
+            "level": session.level,
         }
 
     async def opening_message(self, session: ConversationSession, llm: LLMProvider) -> str:
@@ -239,6 +273,13 @@ class ConversationEngine:
             )
         elif session.restart and session.due_words:
             starter = "Start the restart review: greet briefly, then quiz the first unknown phrase."
+        elif session.scenario_id:
+            starter = (
+                "Start the curated immersive role-play described in the scenario. "
+                "In at most 1 short sentence confirm the situation and roles, then "
+                "IMMEDIATELY speak IN CHARACTER. Do NOT teach phrases. "
+                "Ask one in-character question and end with [[ask]]."
+            )
         else:
             starter = (
                 "Start an immersive role-play for this topic/subtopic. "
@@ -249,7 +290,7 @@ class ConversationEngine:
                 "Ask one in-character question and end with [[ask]]."
             )
         reply = await llm.chat([{"role": "user", "content": starter}], system=system)
-        cleaned, _u, _f, _c, _said, _w = self._process_reply(session, reply)
+        cleaned, _u, _f, _c, _said, _w, _b, _t, _s = self._process_reply(session, reply)
         session.history.append({"role": "assistant", "content": cleaned})
         session.opening = cleaned
         return cleaned
@@ -343,7 +384,9 @@ class ConversationEngine:
             [{"role": m["role"], "content": m["content"]} for m in session.history],
             system=system,
         )
-        cleaned, unknowns, facts, confused, said, wrongs = self._process_reply(session, reply)
+        cleaned, unknowns, facts, confused, said, wrongs, better, tip, speak_score = (
+            self._process_reply(session, reply)
+        )
         # If quota just hit and model forgot to offer continue, keep phase active until next turn
         # but force awaiting via soft flag when asked count crossed target without offer.
         if (
@@ -367,9 +410,12 @@ class ConversationEngine:
             if word.lower() in lower:
                 store.mark_review(word, kind="vocabulary", success=True)
 
-        return {
+        out: dict[str, Any] = {
             "reply": cleaned,
             "said": said,
+            "better": better,
+            "tip": tip,
+            "speak_score": speak_score,
             "transcript_raw": user_text,
             "transcript_display": display_user,
             "unknowns": [{"word": w, "translation": t} for w, t in unknowns],
@@ -380,6 +426,9 @@ class ConversationEngine:
             "free_debate": session.free_debate,
             **self._progress_payload(session),
         }
+        if session.phase == "done":
+            out["recap"] = self._recap_payload(session)
+        return out
 
     def get(self, session_id: str) -> ConversationSession:
         session = self.sessions.get(session_id)

@@ -16,6 +16,8 @@
     "voice",
     "speechRate",
     "silenceTimeout",
+    "learningGoal",
+    "dailyMinutes",
   ];
 
   const state = {
@@ -39,6 +41,7 @@
     isPractice: false,
     conversationPhase: null,
     startInFlight: false,
+    pendingScenarioId: null,
     currentAudio: null,
     currentAudioSource: null,
     audioUnlocked: false,
@@ -435,12 +438,15 @@
   function showAuthGate() {
     $("authGate").classList.remove("hidden");
     $("appMain").classList.add("hidden");
+    $("bottomNav")?.classList.add("hidden");
+    document.body.classList.remove("lesson-open");
     loadLoginUsers().catch(() => {});
   }
 
   function showApp() {
     $("authGate").classList.add("hidden");
     $("appMain").classList.remove("hidden");
+    $("bottomNav")?.classList.remove("hidden");
     $("currentUserName").textContent = state.userName || "—";
     $("adminBadge").classList.toggle("hidden", !state.isAdmin);
     $("addUserBtn").classList.toggle("hidden", !state.isAdmin);
@@ -713,6 +719,8 @@
     applySelectValue("ttsProvider", saved.ttsProvider);
     applySelectValue("speechRate", saved.speechRate === "1.0" ? "1" : saved.speechRate);
     applySelectValue("silenceTimeout", saved.silenceTimeout);
+    applySelectValue("learningGoal", saved.learningGoal);
+    applySelectValue("dailyMinutes", saved.dailyMinutes);
     if (saved.ttsProvider) state.ttsProvider = saved.ttsProvider;
     syncModeUi();
   }
@@ -970,36 +978,39 @@
   function renderStats(payload) {
     const grid = $("statsGrid");
     const recentEl = $("statsRecent");
-    if (!grid || !recentEl) return;
     const c = payload?.conversation || {};
-    const metrics = [
-      ["Konverzácie", String(c.total || 0)],
-      ["Séria dní", `${c.streak_days || 0} (max ${c.best_streak_days || 0})`],
-      ["Úspešnosť", `${c.success_rate ?? 0}%`],
-      ["Čas spolu", formatDuration(c.total_seconds || 0)],
-      ["Otázky", String(c.total_questions || 0)],
-      ["Zlé odpovede", String(c.total_wrongs || 0)],
-    ];
-    grid.innerHTML = metrics
-      .map(
-        ([label, value]) =>
-          `<div class="stats-metric"><strong>${escapeHtml(value)}</strong><span>${escapeHtml(label)}</span></div>`
-      )
-      .join("");
+    if (grid && recentEl) {
+      const metrics = [
+        ["Konverzácie", String(c.total || 0)],
+        ["Séria dní", `${c.streak_days || 0} (max ${c.best_streak_days || 0})`],
+        ["Úspešnosť", `${c.success_rate ?? 0}%`],
+        ["Čas spolu", formatDuration(c.total_seconds || 0)],
+        ["Otázky", String(c.total_questions || 0)],
+        ["Zlé odpovede", String(c.total_wrongs || 0)],
+      ];
+      grid.innerHTML = metrics
+        .map(
+          ([label, value]) =>
+            `<div class="stats-metric"><strong>${escapeHtml(value)}</strong><span>${escapeHtml(label)}</span></div>`
+        )
+        .join("");
 
-    const recent = Array.isArray(c.recent) ? c.recent.slice(0, 8) : [];
-    if (!recent.length) {
-      recentEl.innerHTML = `<p class="muted">Zatiaľ žiadne ukončené konverzácie — po lekcii sa tu objavia.</p>`;
-      return;
+      const recent = Array.isArray(c.recent) ? c.recent.slice(0, 8) : [];
+      if (!recent.length) {
+        recentEl.innerHTML = `<p class="muted">Zatiaľ žiadne ukončené konverzácie — po lekcii sa tu objavia.</p>`;
+      } else {
+        recentEl.innerHTML = recent
+          .map((r) => {
+            const when = String(r.ended_at || "").replace("T", " ").slice(0, 16);
+            const topic = r.free_debate ? "voľná debata" : r.topic || "konverzácia";
+            const right = `${r.questions || 0} ot. · ${r.success_rate ?? 0}% · ${formatDuration(r.duration_sec)}`;
+            return `<div class="stats-recent-row"><div><strong>${escapeHtml(topic)}</strong> <span class="stats-recent-meta">${escapeHtml(when)} · ${escapeHtml(r.level || "")}</span></div><div class="stats-recent-meta">${escapeHtml(right)}</div></div>`;
+          })
+          .join("");
+      }
     }
-    recentEl.innerHTML = recent
-      .map((r) => {
-        const when = String(r.ended_at || "").replace("T", " ").slice(0, 16);
-        const topic = r.free_debate ? "voľná debata" : r.topic || "konverzácia";
-        const right = `${r.questions || 0} ot. · ${r.success_rate ?? 0}% · ${formatDuration(r.duration_sec)}`;
-        return `<div class="stats-recent-row"><div><strong>${escapeHtml(topic)}</strong> <span class="stats-recent-meta">${escapeHtml(when)} · ${escapeHtml(r.level || "")}</span></div><div class="stats-recent-meta">${escapeHtml(right)}</div></div>`;
-      })
-      .join("");
+
+    window.__engUpdateHomeFromStats?.(payload);
   }
 
   async function loadStats() {
@@ -1122,6 +1133,8 @@
   }
 
   function showPanels(mode, phase) {
+    document.body.classList.add("lesson-open");
+    window.__engShowView?.("lesson");
     $("lesson").classList.remove("hidden");
     const debate = phase === "debate" || phase === "comprehension";
     const chatMode = mode === "conversation" || mode === "free_debate";
@@ -1269,7 +1282,7 @@
   }
 
   function buildStartPayload(restart = false) {
-    return {
+    const payload = {
       mode: $("mode").value,
       level: $("level").value,
       topic: $("topic").value,
@@ -1284,6 +1297,10 @@
       user_id: effectiveUserId(),
       restart: !!restart,
     };
+    if (state.pendingScenarioId) {
+      payload.scenario_id = state.pendingScenarioId;
+    }
+    return payload;
   }
 
   async function startLesson(restart = false, forceMode = null) {
@@ -1308,6 +1325,7 @@
     const payload = buildStartPayload(restart);
     state.lastStartPayload = payload;
     state.isPractice = false;
+    state.pendingScenarioId = null;
     const reading = payload.mode === "reading";
     const free = payload.mode === "free_debate";
     setStatus(
@@ -1342,7 +1360,9 @@
           ? (data.suggested_topic
             ? `Voľná debata — ${data.suggested_topic}`
             : "Voľná debata")
-          : (restart ? "Reštart — konverzácia" : "Konverzácia");
+          : (data.scenario_title
+            ? data.scenario_title
+            : (restart ? "Reštart — konverzácia" : "Konverzácia"));
         showPanels(data.mode, data.phase || data.mode);
         $("chat").innerHTML = "";
         appendChat("assistant", data.reply, { audioBase64: data.audio_base64 });
@@ -1365,6 +1385,8 @@
           bindPttMicButton(true);
           syncPttUi();
           pttReadyStatus();
+          document.body.classList.add("lesson-open");
+          window.__engShowView?.("lesson");
         } else {
           await playBase64Mp3(data.audio_base64);
           syncPttUi();
@@ -1468,6 +1490,10 @@
       await loadLearning();
       if (data.stats) renderStats(data.stats);
       else if (data.phase === "done") await loadStats().catch(() => {});
+      window.__engShowTurnFeedback?.(data);
+      if (data.phase === "done" || data.conversation_phase === "done" || data.recap) {
+        window.__engShowRecap?.(data);
+      }
       ptt.processing = false;
       syncPttUi();
       await playBase64Mp3(data.audio_base64);
@@ -1689,10 +1715,13 @@
     const chat = $("chat");
     if (chat) chat.innerHTML = "";
     $("questionProgress")?.classList.add("hidden");
+    $("turnFeedback")?.classList.add("hidden");
     $("lesson")?.classList.add("hidden");
     $("conversationPanel")?.classList.add("hidden");
     $("readingPanel")?.classList.add("hidden");
     $("comprehensionPanel")?.classList.add("hidden");
+    document.body.classList.remove("lesson-open");
+    window.__engShowView?.("home");
   }
 
   async function abandonCurrentLesson() {
@@ -2155,6 +2184,10 @@
       await loadLearning();
       if (data.stats) renderStats(data.stats);
       else if (data.phase === "done") await loadStats().catch(() => {});
+      window.__engShowTurnFeedback?.(data);
+      if (data.phase === "done" || data.conversation_phase === "done" || data.recap) {
+        window.__engShowRecap?.(data);
+      }
       ptt.processing = false;
       syncPttUi();
       await unlockAudioPlayback();
@@ -2633,11 +2666,18 @@
   }
 
   async function bootApp() {
+    window.__engStartLesson = (restart = false, forceMode = null) => startLesson(restart, forceMode);
+    window.__engSaveLessonSettings = () => saveLessonSettings();
+    window.__engSetPendingScenario = (id) => {
+      state.pendingScenarioId = id || null;
+    };
     await loadManagedUsers();
     await loadMeta();
     await loadVoices();
     await loadLearning();
     await loadStats().catch(() => {});
+    window.__engShowView?.("home");
+    window.__engLoadScenarios?.().catch(() => {});
     const health = await api("/api/health");
     if (!health.llm_providers.length) {
       setStatus("Chýba LLM API kľúč (OpenAI / Gemini / Mistral). Edge TTS funguje bez kľúča.", true);

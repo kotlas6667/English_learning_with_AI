@@ -1,0 +1,11 @@
+{
+  "name": "EngLearning",
+  "short_name": "EngLearning",
+  "description": "Practice spoken English with immersive role-play.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0f1f1a",
+  "theme_color": "#1f6f5b",
+  "lang": "sk"
+}

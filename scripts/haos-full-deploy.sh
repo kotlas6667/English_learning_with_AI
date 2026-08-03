@@ -84,8 +84,9 @@ docker run -d \
 
 sleep 2
 echo "==> Health"
-docker exec "${CONTAINER}" grep -E "Ťukni a hovor|app.js\\?v=" /app/app/static/index.html || true
-docker exec "${CONTAINER}" test -f /app/app/user_settings.py && echo "user_settings OK"
+docker exec "${CONTAINER}" grep -E "Ťukni a hovor|app.js\\?v=|bottom-nav|viewHome" /app/app/static/index.html || true
+docker exec "${CONTAINER}" test -f /app/app/scenarios.py && echo "scenarios OK"
+docker exec "${CONTAINER}" test -f /app/app/static/v2-shell.js && echo "v2-shell OK"
 curl -fsS "http://127.0.0.1:8080/api/health" || true
 echo
 echo "==> Hotovo. Nastavenia lekcie sú v volume: ${HOST_DATA}/users/<id>/settings.json"

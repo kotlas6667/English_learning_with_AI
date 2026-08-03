@@ -51,5 +51,8 @@ def test_record_conversation_aggregates(tmp_path: Path):
     assert c["total_wrongs"] == 4
     assert c["success_rate"] == 80.0
     assert c["streak_days"] == 1
+    assert "skills" in summary
+    assert summary["skills"]["accuracy"] == 80
+    assert "today_minutes" in c
     assert len(c["recent"]) == 1
     assert c["recent"][0]["topic"] == "travel"

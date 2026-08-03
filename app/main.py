@@ -16,6 +16,7 @@ from app.modes.comprehension import ComprehensionEngine
 from app.modes.conversation import ConversationEngine
 from app.modes.reading import ReadingEngine
 from app.providers import MODEL_OPTIONS, get_provider
+from app.scenarios import get_scenario, list_scenarios
 from app.topics import LEVELS
 from app.user_topics import TopicDuplicateError
 from app.users import UserManager
@@ -50,6 +51,7 @@ class StartRequest(BaseModel):
     level: str = "A2"
     topic: str = "travel"
     subtopic: str | None = None
+    scenario_id: str | None = None
     llm_provider: str | None = None
     llm_model: str | None = None
     tts_provider: str | None = None
@@ -432,7 +434,26 @@ async def get_user_stats(
 ) -> dict[str, Any]:
     auth_uid = _require_user(authorization, x_session_token)
     uid = _resolve_user_id(user_id, auth_uid=auth_uid)
-    return {"user_id": uid, **users.stats(uid).summary()}
+    payload = {"user_id": uid, **users.stats(uid).summary()}
+    # Enrich vocabulary skill from known learning-store items when available.
+    try:
+        items = users.store(uid).all_items()
+        if items:
+            known = sum(1 for i in items if i.status == "known")
+            skills = dict(payload.get("skills") or {})
+            skills["vocabulary"] = max(
+                0, min(100, int(round(100.0 * known / len(items))))
+            )
+            payload["skills"] = skills
+    except Exception:  # noqa: BLE001
+        pass
+    return payload
+
+
+@app.get("/api/scenarios")
+async def get_scenarios(topic_id: str | None = None) -> dict[str, Any]:
+    """Curated role-play scenarios for quick start (travel / work / daily)."""
+    return {"scenarios": list_scenarios(topic_id=topic_id)}
 
 
 async def _llm_semantic_topic_check(
@@ -960,7 +981,22 @@ async def session_start(
     sentence_count = max(2, min(100, int(body.sentence_count or 20)))
     store = users.store(uid)
     user_context = users.tutor_context(uid)
-    scenario = users.topics(uid).resolve_scenario(body.topic, body.subtopic)
+    curated = get_scenario(body.scenario_id)
+    topic = body.topic
+    subtopic = body.subtopic
+    if curated and body.mode != "free_debate":
+        topic = str(curated.get("topic") or topic)
+        subtopic = curated.get("subtopic") or subtopic
+        scenario = str(
+            curated.get("scenario_en")
+            or curated.get("blurb_sk")
+            or curated.get("title")
+            or ""
+        )
+        if curated.get("min_questions") and not body.restart:
+            min_q = max(2, min(80, int(curated.get("min_questions") or min_q)))
+    else:
+        scenario = users.topics(uid).resolve_scenario(topic, subtopic)
 
     if body.mode in ("conversation", "free_debate"):
         free = body.mode == "free_debate"
@@ -969,8 +1005,8 @@ async def session_start(
             store=store,
             user_id=uid,
             level=body.level,
-            topic=body.topic,
-            subtopic=body.subtopic,
+            topic=topic,
+            subtopic=subtopic,
             provider_name=llm.name,
             llm_model=getattr(llm, "model", "") or body.llm_model or "",
             voice_id=voice_id,
@@ -981,12 +1017,15 @@ async def session_start(
             free_debate=free,
             user_context=user_context,
             scenario=scenario,
+            scenario_id=(curated or {}).get("id") if curated and not free else None,
         )
         reply = await conversation_engine.opening_message(session, llm)
         added_facts = users.append_about_learner(uid, list(session.learned_facts))
         audio_b64 = await _speak_required(reply, voice_id, tts_name, speech_rate)
         mode_name = "free_debate" if free else "conversation"
-        topic_label = session.suggested_topic or body.topic
+        topic_label = session.suggested_topic or topic
+        if curated and not free:
+            topic_label = str(curated.get("title") or topic_label)
         _finish_previous_session_notes(
             user_id=uid,
             mode=mode_name,
@@ -1023,6 +1062,8 @@ async def session_start(
             "conversation_phase": session.phase,
             "restart": body.restart and not free,
             "free_debate": free,
+            "scenario_id": getattr(session, "scenario_id", None) or None,
+            "scenario_title": (curated or {}).get("title") if curated and not free else None,
         }
 
     session = await reading_engine.start(
@@ -1030,8 +1071,8 @@ async def session_start(
         llm=llm,
         user_id=uid,
         level=body.level,
-        topic=body.topic,
-        subtopic=body.subtopic,
+        topic=topic,
+        subtopic=subtopic,
         provider_name=llm.name,
         llm_model=getattr(llm, "model", "") or body.llm_model or "",
         voice_id=voice_id,
@@ -1048,14 +1089,14 @@ async def session_start(
     _finish_previous_session_notes(
         user_id=uid,
         mode="reading",
-        topic=body.topic,
+        topic=topic,
         level=body.level,
         due_words=due_words,
         restart=body.restart,
     )
     users.append_profile_note(
         uid,
-        f"{'Restart' if body.restart else 'Generate'} reading/{body.topic} "
+        f"{'Restart' if body.restart else 'Generate'} reading/{topic} "
         f"at {body.level}; sentences~{sentence_count}; questions={len(session.questions)}",
     )
     return {

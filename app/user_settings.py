@@ -19,6 +19,8 @@ ALLOWED_KEYS = frozenset(
         "voice",
         "speechRate",
         "silenceTimeout",
+        "learningGoal",  # travel | work | daily
+        "dailyMinutes",  # e.g. "15"
     }
 )
 

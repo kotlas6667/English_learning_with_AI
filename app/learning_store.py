@@ -38,6 +38,21 @@ _CONTINUE_DECISION_TAG = re.compile(
     r"\[\[continue:(?P<decision>yes|no)\]\]",
     re.IGNORECASE,
 )
+# Suggested better phrasing for the learner turn (hidden metadata).
+_BETTER_TAG = re.compile(
+    r"\[\[better:(?P<better>[^\]]+)\]\]",
+    re.IGNORECASE,
+)
+# Short Slovak tip for the learner (hidden metadata).
+_TIP_TAG = re.compile(
+    r"\[\[tip:(?P<tip>[^\]]+)\]\]",
+    re.IGNORECASE,
+)
+# Speaking quality score 0–100 (hidden metadata).
+_SCORE_TAG = re.compile(
+    r"\[\[score:(?P<score>\d{1,3})\]\]",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -156,6 +171,55 @@ def parse_said_tag(text: str) -> tuple[str, str | None]:
 
     cleaned = _SAID_TAG.sub(_repl, text)
     return re.sub(r"[ \t]{2,}", " ", cleaned).strip(), said
+
+
+def parse_better_tag(text: str) -> tuple[str, str | None]:
+    """Extract [[better:improved English phrasing]] (last tag wins)."""
+    better: str | None = None
+
+    def _repl(match: re.Match[str]) -> str:
+        nonlocal better
+        value = (match.group("better") or "").strip()
+        if value:
+            better = value
+        return ""
+
+    cleaned = _BETTER_TAG.sub(_repl, text)
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip(), better
+
+
+def parse_tip_tag(text: str) -> tuple[str, str | None]:
+    """Extract [[tip:short Slovak tip]] (last tag wins)."""
+    tip: str | None = None
+
+    def _repl(match: re.Match[str]) -> str:
+        nonlocal tip
+        value = (match.group("tip") or "").strip()
+        if value:
+            tip = value
+        return ""
+
+    cleaned = _TIP_TAG.sub(_repl, text)
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip(), tip
+
+
+def parse_score_tag(text: str) -> tuple[str, int | None]:
+    """Extract [[score:0-100]] speaking score (last valid tag wins)."""
+    score: int | None = None
+
+    def _repl(match: re.Match[str]) -> str:
+        nonlocal score
+        raw = (match.group("score") or "").strip()
+        try:
+            value = int(raw)
+        except ValueError:
+            return ""
+        if 0 <= value <= 100:
+            score = value
+        return ""
+
+    cleaned = _SCORE_TAG.sub(_repl, text)
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip(), score
 
 
 def parse_wrong_tags(text: str) -> tuple[str, list[tuple[str, str]]]:
