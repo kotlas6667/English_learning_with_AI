@@ -7,9 +7,10 @@
 
 set -euo pipefail
 
-# Prefer dedicated v2 repo; fall back to branch "v2" on the original repo.
-BRANCH="${BRANCH:-main}"
-SOURCE_REPO="${SOURCE_REPO:-kotlas6667/English_learning_with_AI_v2}"
+# Source of truth for replace-deploy: branch "v2" on original repo (agent can update it).
+# Dedicated repo English_learning_with_AI_v2 is also fine: SOURCE_REPO=…_v2 BRANCH=main
+BRANCH="${BRANCH:-v2}"
+SOURCE_REPO="${SOURCE_REPO:-kotlas6667/English_learning_with_AI}"
 PROJECT_DIR="${PROJECT_DIR:-/share/English_learning_with_AI}"
 CONTAINER="${CONTAINER:-englearning}"
 IMAGE="${IMAGE:-englearning:latest}"
