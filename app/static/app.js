@@ -37,6 +37,7 @@
     readingPhase: null,
     authMode: "login",
     isPractice: false,
+    conversationPhase: null,
     startInFlight: false,
     currentAudio: null,
     currentAudioSource: null,
@@ -788,15 +789,20 @@
   function syncPttUi() {
     const pttOn = isPttMode();
     const btn = $("pttMicBtn");
-    btn?.classList.toggle("hidden", !pttOn);
-    $("recordConv")?.classList.toggle("hidden", pttOn);
+    // Vždy skryť staré hold tlačidlá — mic je len toggle.
+    $("recordConv")?.classList.toggle("hidden", true);
     $("stopConv")?.classList.toggle("hidden", true);
+    btn?.classList.toggle("hidden", !pttOn);
     if (!btn) return;
     const holding = !!state.ptt?.holding;
     const busy = !!state.ptt?.processing || !!state.ptt?.finalizing;
     btn.classList.toggle("is-holding", holding);
     btn.classList.toggle("is-busy", busy && !holding);
     btn.setAttribute("aria-pressed", holding ? "true" : "false");
+    btn.setAttribute("title", "Ťukni = nahrávaj, ťukni znova = odošli");
+    btn.style.touchAction = "manipulation";
+    btn.style.userSelect = "none";
+    btn.style.webkitUserSelect = "none";
     const label = btn.querySelector(".ptt-label");
     if (label) {
       if (holding) label.textContent = "Stop / odošli";
@@ -1205,6 +1211,9 @@
     const asked = Number(data?.questions_asked ?? 0);
     const target = Number(data?.question_target ?? data?.min_questions ?? 20);
     const phase = data?.conversation_phase || data?.phase || "active";
+    if (phase === "active" || phase === "awaiting_continue" || phase === "done" || phase === "abandoned") {
+      state.conversationPhase = phase;
+    }
     const awaiting = !!data?.awaiting_continue || phase === "awaiting_continue";
     el.classList.remove("hidden", "is-continue", "is-done");
     if (phase === "done") {
@@ -1321,6 +1330,7 @@
       });
       state.sessionId = data.session_id;
       state.mode = data.mode;
+      state.conversationPhase = data.conversation_phase || (data.mode === "conversation" || data.mode === "free_debate" ? "active" : null);
       state.voiceId = payload.voice_id;
       state.ttsProvider = payload.tts_provider;
       state.userId = data.user_id || payload.user_id;
@@ -1352,6 +1362,7 @@
           if (data.mode === "free_debate") setStatus("AI hovorí úvod…");
           await playBase64Mp3(data.audio_base64);
           ensurePtt();
+          bindPttMicButton(true);
           syncPttUi();
           pttReadyStatus();
         } else {
@@ -1670,6 +1681,7 @@
   function clearLessonUi() {
     state.sessionId = null;
     state.mode = null;
+    state.conversationPhase = null;
     state.lastStartPayload = null;
     state.passageText = "";
     state.passageAudio = null;
@@ -1876,7 +1888,12 @@
   async function pttToggleMic(e) {
     if (e?.button != null && e.button !== 0) return;
     if (!state.sessionId || !isPttMode()) {
-      setStatus("Najprv spusti konverzáciu alebo voľnú debatu.", true);
+      setStatus("Najprv spusti konverzáciu (Home → Dnešných 15 min / Spustiť).", true);
+      return;
+    }
+    if (state.conversationPhase === "done" || state.conversationPhase === "abandoned") {
+      setStatus("Lekcia už bola ukončená — spúšťam novú…");
+      await startLesson(false);
       return;
     }
     const ptt = ensurePtt();
@@ -2016,10 +2033,33 @@
     await flushPttAndUpload(ptt);
   }
 
-  function bindPttMicButton() {
-    const mic = $("pttMicBtn");
-    if (!mic || mic.dataset.pttBound === "1") return;
+  function bindPttMicButton(force = false) {
+    let mic = $("pttMicBtn");
+    if (!mic) return;
+
+    // Odstráň staré hold/pointer handlery (Phase A / cache) klonovaním.
+    if (force || mic.dataset.pttMode !== "toggle") {
+      const neo = mic.cloneNode(true);
+      mic.parentNode.replaceChild(neo, mic);
+      mic = $("pttMicBtn");
+      if (!mic) return;
+    } else if (mic.dataset.pttBound === "1") {
+      return;
+    }
+
     mic.dataset.pttBound = "1";
+    mic.dataset.pttMode = "toggle";
+    mic.style.touchAction = "manipulation";
+    mic.style.userSelect = "none";
+    mic.style.webkitUserSelect = "none";
+    // Explicitne žiadny hold.
+    mic.onpointerdown = null;
+    mic.onpointerup = null;
+    mic.onpointerleave = null;
+    mic.onmousedown = null;
+    mic.onmouseup = null;
+    mic.ontouchstart = null;
+    mic.ontouchend = null;
 
     let lastToggleAt = 0;
     const onToggle = (e) => {
@@ -2031,12 +2071,13 @@
       pttToggleMic(e).catch((err) => setStatus(err.message || String(err), true));
     };
 
-    // Toggle: jedno ťuknutie = štart, druhé = stop + odoslať (nie hold).
+    // Toggle: jedno ťuknutie = štart, druhé = stop + odoslať (nie hold / push).
     mic.addEventListener("click", onToggle);
     mic.addEventListener("keydown", (e) => {
       if (e.key === " " || e.key === "Enter") onToggle(e);
     });
     mic.addEventListener("contextmenu", (e) => e.preventDefault());
+    syncPttUi();
   }
 
   async function beginReadingListen() {
@@ -2669,7 +2710,7 @@
   $("recordConv").addEventListener("click", () => startRecording("conversation").catch((e) => setStatus(e.message, true)));
   $("stopConv").addEventListener("click", () => stopRecording("conversation"));
   {
-    bindPttMicButton();
+    bindPttMicButton(true);
   }
   $("recordComp").addEventListener("click", () => startRecording("comprehension").catch((e) => setStatus(e.message, true)));
   $("stopComp").addEventListener("click", () => stopRecording("comprehension"));
