@@ -1,10 +1,10 @@
 # EngLearning v2
 
-Oddelený projekt od **v1** (`kotlas6667/English_learning_with_AI`).
-
 Voice-based English tutor (CEFR A2–B2) — FastAPI + web UI v Dockeri (HAOS ako host).
 
-## Čo je nové vo v2
+Toto je **aktuálna produkčná vetva**. Starý projekt `English_learning_with_AI` (v1) je nahradený týmto repom.
+
+## Čo je vo v2
 
 - Domov + bottom navigácia (Domov / Cvičenie / Pokrok / Profil)
 - Denný cieľ (minúty) + cieľ učenia (cestovanie / práca / bežný život)
@@ -24,26 +24,20 @@ docker compose up -d --build
 
 UI: `http://<IP>:8080`
 
-## Deploy na HAOS (vedľa v1)
+## Deploy na HAOS (nahradí v1)
 
-Odporúčané cesty **oddelené od v1**:
-
-| | v1 | v2 |
-|---|---|---|
-| kód | `/share/English_learning_with_AI` | `/share/English_learning_with_AI_v2` |
-| data | `.../English_learning_with_AI/data` | `.../English_learning_with_AI_v2/data` |
-| kontajner | `englearning` | `englearning-v2` |
-| port | `8080` | `8081` (alebo iný voľný) |
+Skript **zastaví starý kontajner `englearning`**, nahradí kód v `/share/English_learning_with_AI` a spustí v2 na porte **8080**.  
+Volume s dátami (`settings`, štatistiky, learning store) **ostáva**.
 
 ```bash
 cd /tmp
 curl -fsSL -o haos-full-deploy.sh \
-  "https://raw.githubusercontent.com/kotlas6667/English_learning_with_AI_v2/master/scripts/haos-full-deploy.sh"
+  "https://raw.githubusercontent.com/kotlas6667/English_learning_with_AI_v2/main/scripts/haos-full-deploy.sh"
 chmod +x haos-full-deploy.sh
 bash ./haos-full-deploy.sh
 ```
 
-Skript defaultne sťahuje **tento** repo (`master`) do `/share/English_learning_with_AI_v2` a spustí kontajner `englearning-v2` na porte **8081**.
+Po nasadení: **Ctrl+Shift+R** v prehliadači.
 
 ## Local run
 
@@ -58,8 +52,3 @@ uvicorn app.main:app --reload --port 8080
 ## Data (`./data`)
 
 Per-user: settings, stats, learning store, profil. Pri Dockeri mapuj volume — rebuild kódu dáta nemení.
-
-## V1 vs V2
-
-- **v1** ostáva v `https://github.com/kotlas6667/English_learning_with_AI` (bez zmien tohto oddelenia).
-- **v2** je tento repozitár — ďalší vývoj ide sem.
