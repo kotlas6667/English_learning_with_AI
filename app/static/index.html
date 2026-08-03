@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="sk">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#1f6f5b" />
+  <title>EngLearning</title>
+  <link rel="manifest" href="/static/manifest.webmanifest" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Source+Sans+3:wght@400;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css?v=62" />
+</head>
+<body>
+  <div class="bg"></div>
+
+  <div id="activityBar" class="activity-bar" data-state="idle" hidden>
+    <div class="activity-bar-inner">
+      <span class="activity-dot" aria-hidden="true"></span>
+      <div class="activity-copy">
+        <strong id="activityLabel">Stav</strong>
+        <span id="activityText">Pripravené</span>
+      </div>
+    </div>
+  </div>
+
+  <div id="authGate" class="auth-gate">
+    <div class="auth-card">
+      <div class="auth-visual" aria-hidden="true"></div>
+      <div class="auth-body">
+        <p class="brand auth-brand">EngLearning</p>
+        <h1 id="authTitle">Prihlásenie</h1>
+        <p class="auth-hint" id="authHint">Vyber účet a zadaj heslo. Administrator má najvyššie práva (heslo: admin).</p>
+
+        <div id="authLoginFields" class="auth-fields">
+          <label class="auth-field">
+            <span class="auth-label">Používateľ</span>
+            <select id="authUserSelect"></select>
+          </label>
+        </div>
+
+        <div id="authRegisterFields" class="auth-fields hidden">
+          <label class="auth-field">
+            <span class="auth-label">Meno</span>
+            <input id="authName" type="text" maxlength="80" autocomplete="username" />
+          </label>
+          <label class="auth-field">
+            <span class="auth-label">Preferovaná úroveň</span>
+            <select id="authLevel">
+              <option value="A2">A2</option>
+              <option value="B1">B1</option>
+              <option value="B2">B2</option>
+            </select>
+          </label>
+        </div>
+
+        <label class="auth-field">
+          <span class="auth-label">Heslo</span>
+          <input id="authPassword" type="password" maxlength="128" autocomplete="current-password" />
+        </label>
+        <p id="authError" class="modal-error" hidden></p>
+        <div class="actions auth-actions">
+          <button id="authSubmit" class="primary" type="button">Prihlásiť</button>
+          <button id="authToggle" class="ghost" type="button">Vytvoriť nový účet</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <main id="appMain" class="shell shell-app hidden">
+    <header class="app-top">
+      <p class="brand app-brand">EngLearning</p>
+      <p class="app-tagline muted">Praktická angličtina hlasom</p>
+    </header>
+
+    <!-- HOME -->
+    <section id="viewHome" class="view view-home" data-view="home">
+      <div class="home-goal cardish">
+        <h2>Dnešný cieľ</h2>
+        <p id="homeGoalText" class="home-goal-text">Začni dnešných 15 minút konverzácie.</p>
+        <div class="home-goal-meter" aria-hidden="true">
+          <div id="homeGoalFill" class="home-goal-fill" style="width: 0%"></div>
+        </div>
+        <p id="homeGoalMeta" class="muted home-goal-meta">0 / 15 min dnes</p>
+        <button id="homeDailyBtn" type="button" class="primary home-daily-btn">Dnešných 15 min</button>
+      </div>
+
+      <div class="home-reco cardish">
+        <h2>Odporúčanie</h2>
+        <p id="homeRecoTitle" class="home-reco-title">—</p>
+        <p id="homeRecoBlurb" class="muted">Vyber cieľ v profile a dostaneš scenár na mieru.</p>
+        <button id="homeRecoStart" type="button" class="primary">Spustiť</button>
+      </div>
+
+      <div class="home-quick cardish">
+        <h2>Rýchle akcie</h2>
+        <div class="home-quick-actions">
+          <button id="homeFreeDebate" type="button">Voľná debata</button>
+          <button id="homeReading" type="button">Čítanie</button>
+          <button id="homePractice" type="button">Precvičiť</button>
+        </div>
+      </div>
+
+      <div class="home-scenarios cardish">
+        <h2>Scenáre</h2>
+        <p class="muted">Hotové role-play situácie podľa tvojho cieľa.</p>
+        <div id="scenariosList" class="scenarios-list"></div>
+      </div>
+    </section>
+
+    <!-- PRACTICE / SETTINGS -->
+    <section id="viewPractice" class="view view-practice hidden" data-view="practice">
+      <section class="controls cardish">
+        <label class="mode-row">
+          Režim
+          <select id="mode">
+            <option value="conversation">Konverzácia</option>
+            <option value="reading">Čítanie + porozumenie</option>
+            <option value="free_debate">Voľná debata</option>
+          </select>
+        </label>
+
+        <details id="settingsPanel">
+          <summary>Nastavenia lekcie</summary>
+          <div class="settings-body">
+            <section class="settings-group">
+              <header class="settings-group-head">
+                <h3>Obsah lekcie</h3>
+                <p>Úroveň, téma a dĺžka cvičenia</p>
+              </header>
+              <div class="settings-row">
+                <label>
+                  Úroveň
+                  <select id="level"></select>
+                </label>
+                <label>
+                  Téma
+                  <select id="topic"></select>
+                </label>
+                <label class="settings-span-2">
+                  Podtéma
+                  <select id="subtopic"></select>
+                </label>
+              </div>
+              <div class="topic-actions">
+                <button id="addTopicBtn" type="button">+ Téma</button>
+                <button id="addSubtopicBtn" type="button">+ Podtéma</button>
+              </div>
+              <div class="settings-row settings-row-compact">
+                <label>
+                  Min. počet otázok
+                  <select id="minQuestions"></select>
+                </label>
+                <label id="sentenceCountWrap">
+                  Počet viet (čítanie)
+                  <select id="sentenceCount"></select>
+                </label>
+              </div>
+            </section>
+
+            <section class="settings-group">
+              <header class="settings-group-head">
+                <h3>Hlas a model</h3>
+                <p>LLM, TTS a rýchlosť reči</p>
+              </header>
+              <div class="settings-row">
+                <label>
+                  LLM (provider)
+                  <select id="llm"></select>
+                </label>
+                <label class="settings-span-2">
+                  Model
+                  <select id="llmModel"></select>
+                </label>
+                <label>
+                  TTS provider
+                  <select id="ttsProvider"></select>
+                </label>
+                <label class="settings-span-2">
+                  Hlas
+                  <select id="voice"></select>
+                </label>
+                <label>
+                  Rýchlosť reči
+                  <select id="speechRate"></select>
+                </label>
+              </div>
+            </section>
+
+            <section class="settings-group">
+              <header class="settings-group-head">
+                <h3>Počúvanie</h3>
+                <p>Voliteľné — v toggle režime mic odošle hneď po druhom ťuknutí</p>
+              </header>
+              <div class="settings-row settings-row-compact">
+                <label>
+                  Pauza pred odpoveďou AI
+                  <select id="silenceTimeout"></select>
+                </label>
+              </div>
+            </section>
+          </div>
+        </details>
+
+        <div class="actions">
+          <button id="previewVoice" type="button">Skúsiť hlas</button>
+          <button id="startBtn" class="primary" type="button">Štart lekcie</button>
+          <button id="freeDebateBtn" type="button">Voľná debata</button>
+          <button id="restartBtn" type="button">Reštart lekcie</button>
+          <button id="refreshLearning" type="button" class="ghost">Obnoviť slovíčka</button>
+        </div>
+      </section>
+    </section>
+
+    <!-- LESSON -->
+    <section id="lesson" class="lesson view view-lesson hidden" data-view="lesson">
+      <div class="lesson-head">
+        <div class="lesson-head-main">
+          <h2 id="lessonTitle">Lekcia</h2>
+          <span id="phaseBadge" class="badge"></span>
+        </div>
+        <div class="lesson-head-actions">
+          <button id="interruptLessonBtn" type="button" class="ghost" title="Zastaví AI hlas / spracovanie">
+            Prerušiť AI
+          </button>
+          <button id="abandonLessonBtn" type="button" class="danger" title="Úplne zruší lekciu — bez štatistík">
+            Zrušiť lekciu
+          </button>
+        </div>
+      </div>
+
+      <article id="readingPanel" class="hidden">
+        <div id="passage" class="passage"></div>
+        <p id="readFeedback" class="feedback"></p>
+        <div id="wrongWordsBox" class="wrong-words hidden">
+          <h3>Zle prečítané slová / frázy</h3>
+          <ul id="wrongWordsList"></ul>
+        </div>
+        <div class="actions" id="readingActionsReady">
+          <button id="playPassage" type="button">Prehrať vzor</button>
+          <button id="startReadingBtn" type="button" class="primary">Štart čítania</button>
+          <button id="stopRead" type="button" class="danger hidden">Stop</button>
+        </div>
+        <div class="actions hidden" id="readingActionsAfter">
+          <button id="explainBtn" type="button" class="primary">Vysvetlenie textu</button>
+          <button id="stopExplain" type="button" class="danger hidden">Stop vysvetlenie</button>
+          <button id="debateBtn" type="button">Debata o texte</button>
+        </div>
+      </article>
+
+      <article id="conversationPanel" class="hidden">
+        <p id="questionProgress" class="question-progress hidden" aria-live="polite">Otázky: 0 / 20</p>
+        <div id="chat" class="chat"></div>
+        <div id="turnFeedback" class="turn-feedback hidden" aria-live="polite">
+          <div class="turn-feedback-grid">
+            <div>
+              <span class="turn-feedback-label">Povedal si</span>
+              <p id="fbSaid" class="turn-feedback-value">—</p>
+            </div>
+            <div>
+              <span class="turn-feedback-label">Lepšie</span>
+              <p id="fbBetter" class="turn-feedback-value">—</p>
+            </div>
+            <div>
+              <span class="turn-feedback-label">Tip</span>
+              <p id="fbTip" class="turn-feedback-value">—</p>
+            </div>
+            <div>
+              <span class="turn-feedback-label">Skóre</span>
+              <p id="fbScore" class="turn-feedback-score">—</p>
+            </div>
+          </div>
+        </div>
+        <div id="repeatBanner" class="repeat-banner hidden" role="status" aria-live="polite">
+          <p id="repeatBannerText">AI si nie je istá zachytením — zopakuj odpoveď.</p>
+          <button id="repeatAnswerBtn" type="button" class="primary">Zopakovať odpoveď</button>
+        </div>
+        <div class="composer">
+          <input id="textInput" type="text" placeholder="Napíš odpoveď alebo ťukni na mikrofón…" />
+          <button id="sendText" type="button">Odoslať</button>
+          <button id="recordConv" type="button" class="primary hidden">Hovoriť</button>
+          <button id="stopConv" type="button" class="danger hidden">Stop</button>
+          <button
+            id="pttMicBtn"
+            type="button"
+            class="ptt-mic hidden"
+            title="Ťukni = nahrávaj, ťukni znova = odošli"
+            aria-label="Mikrofón: ťukni a hovor, znova ťukni pre stop"
+          >
+            <svg class="ptt-icon" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+              <path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/>
+            </svg>
+            <span class="ptt-label">Ťukni a hovor</span>
+          </button>
+        </div>
+      </article>
+
+      <article id="comprehensionPanel" class="hidden">
+        <p id="questionText" class="question"></p>
+        <p id="compFeedback" class="feedback"></p>
+        <div class="actions">
+          <button id="recordComp" type="button" class="primary">Odpovedať hlasom</button>
+          <button id="stopComp" type="button" class="danger hidden">Stop</button>
+        </div>
+      </article>
+    </section>
+
+    <!-- PROGRESS -->
+    <section id="viewProgress" class="view view-progress hidden" data-view="progress">
+      <section class="stats cardish" id="statsSection">
+        <h2>Štatistiky konverzácií</h2>
+        <p class="muted">Prehľad tvojich lekcií — počet, úspešnosť, čas a séria dní za sebou.</p>
+        <div id="statsGrid" class="stats-grid"></div>
+        <div id="statsRecent" class="stats-recent"></div>
+      </section>
+
+      <section class="skills cardish" id="skillsSection">
+        <h2>Zručnosti</h2>
+        <p class="muted">Odhad podľa tvojej praxe — speaking, slovíčka a presnosť.</p>
+        <div id="skillsGrid" class="skills-grid"></div>
+      </section>
+
+      <section class="learning cardish">
+        <h2>Learning store (tvoj účet)</h2>
+        <p id="dueLine" class="muted"></p>
+        <div class="practice-bar">
+          <button id="practiceOpenBtn" type="button" class="primary">Precvičiť</button>
+        </div>
+        <div id="practicePanel" class="practice-panel hidden">
+          <p class="muted">Vyber typ položiek z learning store a spusti precvičovanie čítaním.</p>
+          <label>
+            Typ
+            <select id="practiceKind">
+              <option value="reading_error">reading_error</option>
+              <option value="vocabulary">vocabulary</option>
+              <option value="question_gap">nerozumel otázke</option>
+              <option value="comprehension">zlá odpoveď</option>
+            </select>
+          </label>
+          <div class="actions">
+            <button id="practiceCancelBtn" type="button" class="ghost">Zrušiť</button>
+            <button id="practiceStartBtn" type="button" class="primary">Štart</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Skóre</th>
+                <th>Typ</th>
+                <th>Položka</th>
+                <th>Tip / preklad</th>
+                <th>Stav</th>
+                <th>Review</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="learningBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <!-- PROFILE -->
+    <section id="viewProfile" class="view view-profile hidden" data-view="profile">
+      <section class="user-bar cardish">
+        <div class="user-pick">
+          <span class="muted">Prihlásený</span>
+          <strong id="currentUserName">—</strong>
+          <span id="adminBadge" class="admin-badge hidden">Administrator</span>
+        </div>
+        <label id="manageUserWrap" class="user-pick hidden">
+          Spravovať účet
+          <select id="manageUserSelect"></select>
+        </label>
+        <div class="actions tight">
+          <button id="addUserBtn" type="button" class="hidden">Nový používateľ</button>
+          <button id="renameUserBtn" type="button" class="ghost">Premenovať</button>
+          <button id="deleteUserBtn" type="button" class="ghost">Zmazať účet</button>
+          <button id="viewProfileBtn" type="button" class="ghost">Profil / história</button>
+          <button id="logoutBtn" type="button">Odhlásiť</button>
+        </div>
+      </section>
+
+      <section class="profile-prefs cardish">
+        <h2>Cieľ učenia</h2>
+        <p class="muted">Podľa cieľa ti odporučíme scenáre na domovskej obrazovke.</p>
+        <div class="profile-prefs-row">
+          <label>
+            Hlavný cieľ
+            <select id="learningGoal">
+              <option value="travel">Cestovanie</option>
+              <option value="work">Práca</option>
+              <option value="daily">Bežný život</option>
+            </select>
+          </label>
+          <label>
+            Denný cieľ (min)
+            <select id="dailyMinutes">
+              <option value="10">10</option>
+              <option value="15" selected>15</option>
+              <option value="20">20</option>
+              <option value="30">30</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <section id="profilePanel" class="cardish hidden">
+        <h2>Profil a história</h2>
+        <pre id="profileText" class="profile-box"></pre>
+        <button id="closeProfileBtn" type="button" class="ghost">Zavrieť</button>
+      </section>
+    </section>
+  </main>
+
+  <nav id="bottomNav" class="bottom-nav hidden" aria-label="Hlavná navigácia">
+    <button type="button" class="bottom-nav-btn is-active" data-nav="home">
+      <span class="bottom-nav-icon" aria-hidden="true">⌂</span>
+      <span>Domov</span>
+    </button>
+    <button type="button" class="bottom-nav-btn" data-nav="practice">
+      <span class="bottom-nav-icon" aria-hidden="true">▶</span>
+      <span>Cvičenie</span>
+    </button>
+    <button type="button" class="bottom-nav-btn" data-nav="progress">
+      <span class="bottom-nav-icon" aria-hidden="true">◈</span>
+      <span>Pokrok</span>
+    </button>
+    <button type="button" class="bottom-nav-btn" data-nav="profile">
+      <span class="bottom-nav-icon" aria-hidden="true">◉</span>
+      <span>Profil</span>
+    </button>
+  </nav>
+
+  <div id="recapModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="recapTitle">
+    <div class="modal-backdrop" id="recapBackdrop"></div>
+    <div class="modal-card recap-card">
+      <h2 id="recapTitle">Súhrn lekcie</h2>
+      <div id="recapBody" class="recap-body"></div>
+      <div class="actions">
+        <button id="recapClose" type="button" class="ghost">Zavrieť</button>
+        <button id="recapHome" type="button" class="primary">Na domov</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="userModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="userModalTitle">
+    <div class="modal-backdrop" id="userModalBackdrop"></div>
+    <div class="modal-card">
+      <h2 id="userModalTitle">Nový používateľ</h2>
+      <p class="muted">Len Administrator môže vytvárať účty. Zadaj unikátne meno a heslo (min. 4 znaky).</p>
+      <label>
+        Meno
+        <input id="newUserName" type="text" maxlength="80" placeholder="napr. Tomas" autocomplete="off" />
+      </label>
+      <label>
+        Heslo
+        <input id="newUserPassword" type="password" maxlength="128" autocomplete="new-password" />
+      </label>
+      <label>
+        Preferovaná úroveň
+        <select id="newUserLevel">
+          <option value="A2">A2</option>
+          <option value="B1">B1</option>
+          <option value="B2">B2</option>
+        </select>
+      </label>
+      <p id="userModalError" class="modal-error" hidden></p>
+      <div class="actions">
+        <button id="userModalCancel" type="button" class="ghost">Zrušiť</button>
+        <button id="userModalSave" type="button" class="primary">Vytvoriť</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="topicModal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-backdrop" id="topicModalBackdrop"></div>
+    <div class="modal-card">
+      <h2 id="topicModalTitle">Nová téma</h2>
+      <p class="muted">Téma sa uloží len pre tvoj účet. Kontrolujeme, či už podobný význam neexistuje.</p>
+      <label>
+        Názov témy
+        <input id="newTopicLabel" type="text" maxlength="80" placeholder="napr. Banking" autocomplete="off" />
+      </label>
+      <label>
+        Popis / význam (voliteľné)
+        <input id="newTopicDesc" type="text" maxlength="200" placeholder="napr. bank account, cards, loans" autocomplete="off" />
+      </label>
+      <p id="topicModalError" class="modal-error" hidden></p>
+      <div class="actions">
+        <button id="topicModalCancel" type="button" class="ghost">Zrušiť</button>
+        <button id="topicModalForce" type="button" class="ghost hidden">Pridať aj tak</button>
+        <button id="topicModalSave" type="button" class="primary">Pridať tému</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="subtopicModal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-backdrop" id="subtopicModalBackdrop"></div>
+    <div class="modal-card">
+      <h2>Nová podtéma</h2>
+      <p class="muted">Podtéma sa pridá k vybranej téme tvojho účtu.</p>
+      <label>
+        Téma
+        <select id="subtopicParent"></select>
+      </label>
+      <label>
+        Názov podtémy
+        <input id="newSubtopicLabel" type="text" maxlength="120" placeholder="napr. Opening a bank account" autocomplete="off" />
+      </label>
+      <label>
+        Popis (voliteľné)
+        <input id="newSubtopicDesc" type="text" maxlength="200" placeholder="krátky scenár" autocomplete="off" />
+      </label>
+      <p id="subtopicModalError" class="modal-error" hidden></p>
+      <div class="actions">
+        <button id="subtopicModalCancel" type="button" class="ghost">Zrušiť</button>
+        <button id="subtopicModalForce" type="button" class="ghost hidden">Pridať aj tak</button>
+        <button id="subtopicModalSave" type="button" class="primary">Pridať podtému</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js?v=62"></script>
+  <script src="/static/v2-shell.js?v=62"></script>
+</body>
+</html>
