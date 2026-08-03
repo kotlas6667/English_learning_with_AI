@@ -17,11 +17,52 @@ _UNKNOWN_TAG = re.compile(
 )
 _LEARN_TAG = re.compile(r"\[\[learn:(?P<fact>[^\]]+)\]\]", re.IGNORECASE)
 _TOPIC_TAG = re.compile(r"\[\[topic:(?P<topic>[^\]]+)\]\]", re.IGNORECASE)
+# Learner did not understand the tutor's question → store + rephrase.
+_CONFUSED_TAG = re.compile(
+    r"\[\[confused:(?P<summary>[^|\]]+)(?:\|(?P<note>[^\]]+))?\]\]",
+    re.IGNORECASE,
+)
+# Cleaned interpretation of learner speech (esp. after Whisper STT).
+_SAID_TAG = re.compile(
+    r"\[\[said:(?P<said>[^\]]+)\]\]",
+    re.IGNORECASE,
+)
+# Tutor is unsure the STT capture matches what the learner said → ask to repeat.
+_UNCLEAR_TAG = re.compile(
+    r"\[\[unclear:(?P<reason>[^\]]+)\]\]",
+    re.IGNORECASE,
+)
+# Pedagogically wrong answer in conversation → comprehension store.
+_WRONG_TAG = re.compile(
+    r"\[\[wrong:(?P<summary>[^|\]]+)(?:\|(?P<note>[^\]]+))?\]\]",
+    re.IGNORECASE,
+)
+# Conversation milestone: offer more practice / accept / end.
+_ASK_CONTINUE_TAG = re.compile(r"\[\[ask_continue\]\]", re.IGNORECASE)
+_CONTINUE_DECISION_TAG = re.compile(
+    r"\[\[continue:(?P<decision>yes|no)\]\]",
+    re.IGNORECASE,
+)
+# Suggested better phrasing for the learner turn (hidden metadata).
+_BETTER_TAG = re.compile(
+    r"\[\[better:(?P<better>[^\]]+)\]\]",
+    re.IGNORECASE,
+)
+# Short Slovak tip for the learner (hidden metadata).
+_TIP_TAG = re.compile(
+    r"\[\[tip:(?P<tip>[^\]]+)\]\]",
+    re.IGNORECASE,
+)
+# Speaking quality score 0–100 (hidden metadata).
+_SCORE_TAG = re.compile(
+    r"\[\[score:(?P<score>\d{1,3})\]\]",
+    re.IGNORECASE,
+)
 
 
 @dataclass
 class LearningItem:
-    kind: str  # vocabulary | reading_error | comprehension
+    kind: str  # vocabulary | reading_error | comprehension | question_gap
     word: str
     translation_sk: str = ""
     level: str = "A2"
@@ -107,6 +148,160 @@ def parse_topic_tag(text: str) -> tuple[str, str | None]:
     return re.sub(r"[ \t]{2,}", " ", cleaned).strip(), topic
 
 
+def parse_confused_tags(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """Extract [[confused:question summary|optional note]] markers."""
+    found: list[tuple[str, str]] = []
+
+    def _repl(match: re.Match[str]) -> str:
+        summary = (match.group("summary") or "").strip()
+        note = (match.group("note") or "").strip()
+        if summary:
+            found.append((summary, note))
+        return ""
+
+    cleaned = _CONFUSED_TAG.sub(_repl, text)
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip(), found
+
+
+def parse_said_tag(text: str) -> tuple[str, str | None]:
+    """Extract [[said:cleaned learner utterance]] (last tag wins)."""
+    said: str | None = None
+
+    def _repl(match: re.Match[str]) -> str:
+        nonlocal said
+        value = (match.group("said") or "").strip()
+        if value:
+            said = value
+        return ""
+
+    cleaned = _SAID_TAG.sub(_repl, text)
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip(), said
+
+
+def parse_unclear_tag(text: str) -> tuple[str, str | None]:
+    """Extract [[unclear:reason]] — STT capture is uncertain (last tag wins)."""
+    reason: str | None = None
+
+    def _repl(match: re.Match[str]) -> str:
+        nonlocal reason
+        value = (match.group("reason") or "").strip()
+        if value:
+            reason = value
+        return ""
+
+    cleaned = _UNCLEAR_TAG.sub(_repl, text)
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip(), reason
+
+
+def _normalize_words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9']+", (text or "").lower())
+
+
+def sanitize_said(raw: str, said: str | None) -> str | None:
+    """Keep [[said:]] only when it is a light cleanup of raw STT — reject context fill-ins.
+
+    Example rejected: raw=\"I don't know\" → said=\"I don't know the error in my Python code\"
+    """
+    if not said:
+        return None
+    raw_words = _normalize_words(raw)
+    said_words = _normalize_words(said)
+    if not said_words or not raw_words:
+        return None
+    # Reject large expansions (AI inventing words from conversation context).
+    max_extra = max(2, len(raw_words) // 2)
+    if len(said_words) > len(raw_words) + max_extra:
+        return None
+    raw_set = set(raw_words)
+    shared = sum(1 for w in said_words if w in raw_set)
+    if shared < max(1, int(round(0.55 * len(said_words)))):
+        return None
+    return said.strip()
+
+
+def parse_better_tag(text: str) -> tuple[str, str | None]:
+    """Extract [[better:improved English phrasing]] (last tag wins)."""
+    better: str | None = None
+
+    def _repl(match: re.Match[str]) -> str:
+        nonlocal better
+        value = (match.group("better") or "").strip()
+        if value:
+            better = value
+        return ""
+
+    cleaned = _BETTER_TAG.sub(_repl, text)
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip(), better
+
+
+def parse_tip_tag(text: str) -> tuple[str, str | None]:
+    """Extract [[tip:short Slovak tip]] (last tag wins)."""
+    tip: str | None = None
+
+    def _repl(match: re.Match[str]) -> str:
+        nonlocal tip
+        value = (match.group("tip") or "").strip()
+        if value:
+            tip = value
+        return ""
+
+    cleaned = _TIP_TAG.sub(_repl, text)
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip(), tip
+
+
+def parse_score_tag(text: str) -> tuple[str, int | None]:
+    """Extract [[score:0-100]] speaking score (last valid tag wins)."""
+    score: int | None = None
+
+    def _repl(match: re.Match[str]) -> str:
+        nonlocal score
+        raw = (match.group("score") or "").strip()
+        try:
+            value = int(raw)
+        except ValueError:
+            return ""
+        if 0 <= value <= 100:
+            score = value
+        return ""
+
+    cleaned = _SCORE_TAG.sub(_repl, text)
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip(), score
+
+
+def parse_wrong_tags(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """Extract [[wrong:expected/summary|optional Slovak tip]] markers."""
+    found: list[tuple[str, str]] = []
+
+    def _repl(match: re.Match[str]) -> str:
+        summary = (match.group("summary") or "").strip()
+        note = (match.group("note") or "").strip()
+        if summary:
+            found.append((summary, note))
+        return ""
+
+    cleaned = _WRONG_TAG.sub(_repl, text)
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip(), found
+
+
+def parse_ask_continue_tag(text: str) -> tuple[str, bool]:
+    found = bool(_ASK_CONTINUE_TAG.search(text))
+    cleaned = _ASK_CONTINUE_TAG.sub("", text)
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip(), found
+
+
+def parse_continue_decision_tag(text: str) -> tuple[str, str | None]:
+    """Extract [[continue:yes]] / [[continue:no]] (last tag wins)."""
+    decision: str | None = None
+
+    def _repl(match: re.Match[str]) -> str:
+        nonlocal decision
+        decision = (match.group("decision") or "").strip().lower() or decision
+        return ""
+
+    cleaned = _CONTINUE_DECISION_TAG.sub(_repl, text)
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip(), decision
+
+
 def _next_interval(times_correct: int) -> int:
     idx = min(max(times_correct, 0), len(INTERVALS_DAYS) - 1)
     return INTERVALS_DAYS[idx]
@@ -119,6 +314,7 @@ class MarkdownLearningStore(LearningStore):
         "vocabulary": "vocabulary.md",
         "reading_error": "reading_errors.md",
         "comprehension": "comprehension.md",
+        "question_gap": "question_gaps.md",
     }
 
     HEADERS = [
@@ -280,6 +476,7 @@ class MarkdownLearningStore(LearningStore):
             "vocabulary": "Unknown vocabulary",
             "reading_error": "Reading / expression errors",
             "comprehension": "Comprehension gaps",
+            "question_gap": "Did not understand the question",
         }.get(kind, kind)
         lines = [
             f"# {title}",

@@ -74,4 +74,7 @@ class EdgeTTS(TTSProvider):
             return (pref, item["name"].lower())
 
         voices.sort(key=sort_key)
-        return voices
+        # Cap list for UI — full catalog is large and unnecessary in a <select>.
+        preferred = [v for v in voices if v["voice_id"] in PREFERRED_EDGE]
+        rest = [v for v in voices if v["voice_id"] not in PREFERRED_EDGE]
+        return preferred + rest[:30]

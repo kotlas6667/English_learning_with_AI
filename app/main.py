@@ -16,6 +16,7 @@ from app.modes.comprehension import ComprehensionEngine
 from app.modes.conversation import ConversationEngine
 from app.modes.reading import ReadingEngine
 from app.providers import MODEL_OPTIONS, get_provider
+from app.scenarios import get_scenario, list_scenarios
 from app.topics import LEVELS
 from app.user_topics import TopicDuplicateError
 from app.users import UserManager
@@ -50,6 +51,7 @@ class StartRequest(BaseModel):
     level: str = "A2"
     topic: str = "travel"
     subtopic: str | None = None
+    scenario_id: str | None = None
     llm_provider: str | None = None
     llm_model: str | None = None
     tts_provider: str | None = None
@@ -97,6 +99,11 @@ class DeleteUserRequest(BaseModel):
 class DeleteLearningRequest(BaseModel):
     kind: str = Field(min_length=1, max_length=40)
     word: str = Field(min_length=1, max_length=300)
+    user_id: str | None = None
+
+
+class LessonSettingsRequest(BaseModel):
+    settings: dict[str, Any] = Field(default_factory=dict)
     user_id: str | None = None
 
 
@@ -238,6 +245,7 @@ async def meta(
     default_tts = normalize_tts_provider(settings.tts_provider)
     auth_uid = _optional_user(authorization, x_session_token)
     topics: list[dict[str, Any]] = []
+    lesson_settings: dict[str, str] = {}
     uid = auth_uid
     is_admin = False
     if auth_uid:
@@ -246,15 +254,19 @@ async def meta(
             is_admin = actor.is_admin()
             uid = _resolve_user_id(user_id, auth_uid=auth_uid) if user_id else auth_uid
             topics = users.topics(uid).list_topics()
+            lesson_settings = users.settings(uid).read()
             users.set_active_user(uid)
         except (KeyError, HTTPException):
             uid = auth_uid
             try:
                 topics = users.topics(auth_uid).list_topics()
+                lesson_settings = users.settings(auth_uid).read()
             except KeyError:
                 topics = []
+                lesson_settings = {}
     return {
         "topics": topics,
+        "lesson_settings": lesson_settings,
         "levels": list(LEVELS),
         "llm_providers": settings.available_llm_providers(),
         "llm_options": options,
@@ -389,6 +401,59 @@ async def get_topics(
     auth_uid = _require_user(authorization, x_session_token)
     uid = _resolve_user_id(user_id, auth_uid=auth_uid)
     return {"user_id": uid, "topics": users.topics(uid).list_topics()}
+
+
+@app.get("/api/settings")
+async def get_lesson_settings(
+    user_id: str | None = None,
+    authorization: str | None = Header(None),
+    x_session_token: str | None = Header(None),
+) -> dict[str, Any]:
+    auth_uid = _require_user(authorization, x_session_token)
+    uid = _resolve_user_id(user_id, auth_uid=auth_uid)
+    return {"user_id": uid, "settings": users.settings(uid).read()}
+
+
+@app.put("/api/settings")
+async def put_lesson_settings(
+    body: LessonSettingsRequest,
+    authorization: str | None = Header(None),
+    x_session_token: str | None = Header(None),
+) -> dict[str, Any]:
+    auth_uid = _require_user(authorization, x_session_token)
+    uid = _resolve_user_id(body.user_id, auth_uid=auth_uid)
+    saved = users.settings(uid).write(body.settings or {})
+    return {"user_id": uid, "settings": saved}
+
+
+@app.get("/api/stats")
+async def get_user_stats(
+    user_id: str | None = None,
+    authorization: str | None = Header(None),
+    x_session_token: str | None = Header(None),
+) -> dict[str, Any]:
+    auth_uid = _require_user(authorization, x_session_token)
+    uid = _resolve_user_id(user_id, auth_uid=auth_uid)
+    payload = {"user_id": uid, **users.stats(uid).summary()}
+    # Enrich vocabulary skill from known learning-store items when available.
+    try:
+        items = users.store(uid).all_items()
+        if items:
+            known = sum(1 for i in items if i.status == "known")
+            skills = dict(payload.get("skills") or {})
+            skills["vocabulary"] = max(
+                0, min(100, int(round(100.0 * known / len(items))))
+            )
+            payload["skills"] = skills
+    except Exception:  # noqa: BLE001
+        pass
+    return payload
+
+
+@app.get("/api/scenarios")
+async def get_scenarios(topic_id: str | None = None) -> dict[str, Any]:
+    """Curated role-play scenarios for quick start (travel / work / daily)."""
+    return {"scenarios": list_scenarios(topic_id=topic_id)}
 
 
 async def _llm_semantic_topic_check(
@@ -826,6 +891,69 @@ def _finish_previous_session_notes(
     )
 
 
+def _record_conversation_stats(session) -> dict[str, Any] | None:
+    """Persist one conversation into users/<id>/stats.json (once)."""
+    entry = conversation_engine.conversation_stats_entry(session)
+    if not entry:
+        return None
+    ended_at = entry.pop("ended_at", None)
+    summary = users.stats(session.user_id).record_conversation(
+        ended_at=ended_at,
+        **entry,
+    )
+    session.stats_recorded = True
+    mins = max(1, int(round(entry["duration_sec"] / 60))) if entry["duration_sec"] else 0
+    users.append_history(
+        session.user_id,
+        f"**END conversation** · {entry.get('topic')} · "
+        f"questions={entry['questions']} · wrongs={entry['wrongs']} · "
+        f"~{mins} min · continued={entry['continued']} · completed={entry['completed']}",
+    )
+    return summary
+
+
+def _finalize_closed_conversations(user_id: str) -> None:
+    for old in conversation_engine.close_user_sessions(user_id):
+        try:
+            _record_conversation_stats(old)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+@app.post("/api/session/abandon")
+async def session_abandon(
+    body: SessionIdBody,
+    authorization: str | None = Header(None),
+    x_session_token: str | None = Header(None),
+) -> dict[str, Any]:
+    """Zruší lekciu bez zápisu do štatistík a bez návratu."""
+    auth_uid = _require_user(authorization, x_session_token)
+    sid = (body.session_id or "").strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="Chýba session_id.")
+
+    mode = "conversation"
+    try:
+        existing = conversation_engine.get(sid)
+    except KeyError:
+        try:
+            existing = reading_engine.get(sid)
+            mode = "reading"
+        except KeyError:
+            return {"ok": True, "abandoned": True, "session_id": sid, "mode": None}
+
+    _assert_session_owner(existing.user_id, auth_uid)
+    if mode == "conversation":
+        conversation_engine.abandon_session(sid)
+    else:
+        reading_engine.abandon_session(sid)
+    users.append_history(
+        existing.user_id,
+        f"**ABANDONED {mode}** · session zrušená bez štatistík",
+    )
+    return {"ok": True, "abandoned": True, "session_id": sid, "mode": mode}
+
+
 @app.post("/api/session/start")
 async def session_start(
     body: StartRequest,
@@ -853,16 +981,32 @@ async def session_start(
     sentence_count = max(2, min(100, int(body.sentence_count or 20)))
     store = users.store(uid)
     user_context = users.tutor_context(uid)
-    scenario = users.topics(uid).resolve_scenario(body.topic, body.subtopic)
+    curated = get_scenario(body.scenario_id)
+    topic = body.topic
+    subtopic = body.subtopic
+    if curated and body.mode != "free_debate":
+        topic = str(curated.get("topic") or topic)
+        subtopic = curated.get("subtopic") or subtopic
+        scenario = str(
+            curated.get("scenario_en")
+            or curated.get("blurb_sk")
+            or curated.get("title")
+            or ""
+        )
+        if curated.get("min_questions") and not body.restart:
+            min_q = max(2, min(80, int(curated.get("min_questions") or min_q)))
+    else:
+        scenario = users.topics(uid).resolve_scenario(topic, subtopic)
 
     if body.mode in ("conversation", "free_debate"):
         free = body.mode == "free_debate"
+        _finalize_closed_conversations(uid)
         session = conversation_engine.start(
             store=store,
             user_id=uid,
             level=body.level,
-            topic=body.topic,
-            subtopic=body.subtopic,
+            topic=topic,
+            subtopic=subtopic,
             provider_name=llm.name,
             llm_model=getattr(llm, "model", "") or body.llm_model or "",
             voice_id=voice_id,
@@ -873,12 +1017,15 @@ async def session_start(
             free_debate=free,
             user_context=user_context,
             scenario=scenario,
+            scenario_id=(curated or {}).get("id") if curated and not free else None,
         )
         reply = await conversation_engine.opening_message(session, llm)
         added_facts = users.append_about_learner(uid, list(session.learned_facts))
         audio_b64 = await _speak_required(reply, voice_id, tts_name, speech_rate)
         mode_name = "free_debate" if free else "conversation"
-        topic_label = session.suggested_topic or body.topic
+        topic_label = session.suggested_topic or topic
+        if curated and not free:
+            topic_label = str(curated.get("title") or topic_label)
         _finish_previous_session_notes(
             user_id=uid,
             mode=mode_name,
@@ -909,8 +1056,14 @@ async def session_start(
             "speech_rate": speech_rate,
             "min_questions": session.min_questions,
             "questions_asked": session.questions_asked,
+            "question_batch": session.question_batch,
+            "question_target": session.question_target,
+            "awaiting_continue": session.awaiting_continue,
+            "conversation_phase": session.phase,
             "restart": body.restart and not free,
             "free_debate": free,
+            "scenario_id": getattr(session, "scenario_id", None) or None,
+            "scenario_title": (curated or {}).get("title") if curated and not free else None,
         }
 
     session = await reading_engine.start(
@@ -918,8 +1071,8 @@ async def session_start(
         llm=llm,
         user_id=uid,
         level=body.level,
-        topic=body.topic,
-        subtopic=body.subtopic,
+        topic=topic,
+        subtopic=subtopic,
         provider_name=llm.name,
         llm_model=getattr(llm, "model", "") or body.llm_model or "",
         voice_id=voice_id,
@@ -936,14 +1089,14 @@ async def session_start(
     _finish_previous_session_notes(
         user_id=uid,
         mode="reading",
-        topic=body.topic,
+        topic=topic,
         level=body.level,
         due_words=due_words,
         restart=body.restart,
     )
     users.append_profile_note(
         uid,
-        f"{'Restart' if body.restart else 'Generate'} reading/{body.topic} "
+        f"{'Restart' if body.restart else 'Generate'} reading/{topic} "
         f"at {body.level}; sentences~{sentence_count}; questions={len(session.questions)}",
     )
     return {
@@ -1045,13 +1198,21 @@ async def conversation_turn(
     _assert_session_owner(session.user_id, auth_uid)
     speech_rate = _session_speech_rate(session, body.speech_rate)
     llm = get_provider(settings, session.provider_name, getattr(session, "llm_model", None) or None)
-    result = await conversation_engine.user_turn(session, llm, body.text.strip())
+    raw_text = body.text.strip()
+    result = await conversation_engine.user_turn(session, llm, raw_text, from_stt=False)
     facts = list(result.get("learned_facts") or [])
-    added = _log_conversation_turn(session, body.text.strip(), result["reply"], facts=facts)
+    display = (result.get("transcript_display") or result.get("said") or raw_text).strip()
+    added = _log_conversation_turn(session, display, result["reply"], facts=facts)
+    stats_summary = None
+    if result.get("phase") == "done":
+        stats_summary = _record_conversation_stats(session)
     audio_b64 = await _speak_required(
         result["reply"], session.voice_id, session.tts_provider, speech_rate
     )
-    return {**result, "audio_base64": audio_b64, "learned_facts": added, "speech_rate": speech_rate}
+    out = {**result, "audio_base64": audio_b64, "learned_facts": added, "speech_rate": speech_rate}
+    if stats_summary:
+        out["stats"] = stats_summary
+    return out
 
 
 @app.post("/api/conversation/utterance")
@@ -1077,21 +1238,39 @@ async def conversation_utterance(
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Whisper STT: {exc}") from exc
     if not transcript:
-        raise HTTPException(status_code=400, detail="Nepodarilo sa rozpoznať reč.")
+        # Whisper often invents words from silence; treat as no speech (not a hard failure).
+        return {
+            "transcript": "",
+            "reply": "",
+            "audio_base64": None,
+            "no_speech": True,
+            "detail": "Nepočul som ťa — skús znova držať mikrofón a hovoriť jasnejšie.",
+            "speech_rate": rate,
+        }
     llm = get_provider(settings, session.provider_name, getattr(session, "llm_model", None) or None)
-    result = await conversation_engine.user_turn(session, llm, transcript)
+    result = await conversation_engine.user_turn(session, llm, transcript, from_stt=True)
     facts = list(result.get("learned_facts") or [])
-    added = _log_conversation_turn(session, transcript, result["reply"], facts=facts)
+    display = (result.get("transcript_raw") or result.get("transcript_display") or transcript).strip()
+    added = _log_conversation_turn(session, display, result["reply"], facts=facts)
+    stats_summary = None
+    if result.get("phase") == "done":
+        stats_summary = _record_conversation_stats(session)
     audio_b64 = await _speak_required(
         result["reply"], session.voice_id, session.tts_provider, rate
     )
-    return {
+    out = {
         **result,
-        "transcript": transcript,
+        "transcript": display,
+        "transcript_raw": transcript,
+        "said": display,
         "audio_base64": audio_b64,
         "learned_facts": added,
         "speech_rate": rate,
+        "no_speech": False,
     }
+    if stats_summary:
+        out["stats"] = stats_summary
+    return out
 
 
 @app.post("/api/reading/begin")

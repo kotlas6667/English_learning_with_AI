@@ -1,8 +1,51 @@
 from __future__ import annotations
 
 import io
+import re
 
 from openai import AsyncOpenAI
+
+# Whisper often invents short phrases from silence / near-silence.
+# Keep this list conservative — real learner answers like "yes"/"no"/"ok" must pass.
+_SILENCE_HALLUCINATIONS = frozenset(
+    {
+        "you",
+        "uh",
+        "um",
+        "hmm",
+        "mm",
+        "mhm",
+        "ah",
+        "oh",
+        "thank you for watching",
+        "thanks for watching",
+        "thanks for watching everybody",
+        "subtitles by the amara.org community",
+        "字幕",
+        "ご視聴ありがとうございました",
+    }
+)
+
+_PUNCT_RE = re.compile(r"^[\W_]+$", re.UNICODE)
+
+
+def normalize_transcript(text: str) -> str:
+    """Strip Whisper silence hallucinations; empty means 'no speech'."""
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    if _PUNCT_RE.match(raw):
+        return ""
+    normalized = re.sub(r"\s+", " ", raw).strip().lower()
+    normalized = normalized.strip(" .!?,;:\"'`…")
+    if not normalized:
+        return ""
+    if normalized in _SILENCE_HALLUCINATIONS:
+        return ""
+    tokens = normalized.split()
+    if len(tokens) == 1 and tokens[0] in _SILENCE_HALLUCINATIONS:
+        return ""
+    return raw
 
 
 class WhisperSTT:
@@ -22,5 +65,6 @@ class WhisperSTT:
             model=self._model,
             file=buffer,
             language="en",
+            temperature=0,
         )
-        return (result.text or "").strip()
+        return normalize_transcript(result.text or "")

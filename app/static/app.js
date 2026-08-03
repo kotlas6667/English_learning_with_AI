@@ -2,6 +2,7 @@
   const $ = (id) => document.getElementById(id);
   const TOKEN_KEY = "englearning_token";
   const SETTINGS_KEY = "englearning_lesson_settings";
+  const MIC_KEY = "englearning_mic_permission";
   const SETTINGS_FIELDS = [
     "mode",
     "level",
@@ -15,6 +16,8 @@
     "voice",
     "speechRate",
     "silenceTimeout",
+    "learningGoal",
+    "dailyMinutes",
   ];
 
   const state = {
@@ -36,8 +39,23 @@
     readingPhase: null,
     authMode: "login",
     isPractice: false,
+    conversationPhase: null,
     startInFlight: false,
+    pendingScenarioId: null,
     currentAudio: null,
+    currentAudioSource: null,
+    audioUnlocked: false,
+    audioContext: null,
+    audioEl: null,
+    audioKeepalive: null,
+    micPermission: (() => {
+      try {
+        const v = localStorage.getItem("englearning_mic_permission");
+        return v === "granted" || v === "denied" ? v : null;
+      } catch (_) {
+        return null;
+      }
+    })(),
     ptt: null,
   };
 
@@ -52,18 +70,16 @@
     if (t.includes("prerušen") || t.includes("pocujem") || t.includes("počujem") || t.includes("hovor ďalej") || t.includes("hovor dalej")) {
       return "hearing";
     }
-    if (t.includes("ticho") || t.includes("odošlem") || t.includes("odoslem")) return "silence";
+    // Countdown po pustení holdu — nie ready text s „odošlem“.
+    if (t.startsWith("pauza") || /\bpauza[…. ]/.test(t)) return "silence";
+    if (t.includes("nahrávam") || t.includes("pokračujem v nahrávaní")) return "listening";
+    // Pripravený PTT stav (toggle).
+    if (t.includes("ťukni na mikrofón") || (t.includes("mikrofón") && t.includes("odošle"))) return "idle";
+    if (t.includes("drž mikrofón") && t.includes("po pustení")) return "idle";
     if (
-      t.includes("počúvam") || t.includes("pocuvam") || t.includes("počúvanie")
-      || t.includes("live") || t.includes("mikrofón")
+      t.includes("počúvam") || t.includes("pocuvam") || t.includes("počúvanie") || t.includes("live")
     ) {
       return "listening";
-    }
-    if (
-      t.includes("ai odpovedá") || t.includes("ai hovorí") || t.includes("ukážka")
-      || t.includes("prehávam") || t.includes("prehrávam") || t.includes("odpovedá")
-    ) {
-      return "speaking";
     }
     if (
       t.includes("spracúvam") || t.includes("generujem") || t.includes("pripravujem")
@@ -132,35 +148,205 @@
   }
 
   function stopCurrentAudio() {
+    const source = state.currentAudioSource;
+    if (source) {
+      try {
+        source.stop(0);
+      } catch (_) {}
+      state.currentAudioSource = null;
+    }
     const audio = state.currentAudio;
     if (!audio) return;
     try {
       audio.pause();
-      audio.src = "";
+      const src = audio.src;
+      if (audio !== state.audioEl) {
+        audio.removeAttribute("src");
+        audio.load();
+      }
+      if (src && src.startsWith("blob:")) URL.revokeObjectURL(src);
     } catch (_) {}
     state.currentAudio = null;
   }
 
-  function playBase64Mp3(b64) {
+  function base64ToUint8Array(b64) {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+
+  function base64ToMp3ObjectUrl(b64) {
+    const bytes = base64ToUint8Array(b64);
+    const blob = new Blob([bytes], { type: "audio/mpeg" });
+    return URL.createObjectURL(blob);
+  }
+
+  async function ensureAudioContext() {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return null;
+    if (!state.audioContext) state.audioContext = new Ctx();
+    if (state.audioContext.state === "suspended") {
+      try {
+        await state.audioContext.resume();
+      } catch (_) {}
+    }
+    return state.audioContext;
+  }
+
+  async function startAudioKeepalive() {
+    // Keepalive loop removed — iOS Safari leakoval RAM pri Audio.loop = true.
+  }
+
+  function stopAudioKeepalive() {
+    const warm = state.audioKeepalive;
+    if (!warm) return;
+    try {
+      warm.pause();
+      warm.removeAttribute("src");
+      warm.load();
+    } catch (_) {}
+    state.audioKeepalive = null;
+  }
+
+  async function unlockAudioPlayback() {
+    try {
+      await Promise.race([
+        ensureAudioContext(),
+        new Promise((resolve) => setTimeout(resolve, 400)),
+      ]);
+      if (!state.audioEl) {
+        state.audioEl = new Audio();
+        state.audioEl.preload = "auto";
+        state.audioEl.setAttribute("playsinline", "true");
+        state.audioEl.playsInline = true;
+      }
+      // Jednorazový silent play (BEZ loop) — odomkne autoplay, nežíra RAM.
+      const warm = state.audioEl;
+      const prevVol = warm.volume;
+      warm.loop = false;
+      warm.volume = 0.01;
+      warm.src =
+        "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=";
+      try {
+        const playP = warm.play();
+        if (playP && typeof playP.then === "function") {
+          await Promise.race([
+            playP,
+            new Promise((resolve) => setTimeout(resolve, 400)),
+          ]);
+        }
+        try {
+          warm.pause();
+        } catch (_) {}
+      } catch (_) {}
+      warm.volume = prevVol || 1;
+      state.audioUnlocked = true;
+    } catch (_) {
+      // Best-effort; replay via 🔊 still works on tap.
+    }
+  }
+
+  function pickRecorderMimeType() {
+    const types = [
+      "audio/mp4",
+      "audio/aac",
+      "audio/webm;codecs=opus",
+      "audio/webm",
+    ];
+    for (const t of types) {
+      try {
+        if (window.MediaRecorder?.isTypeSupported?.(t)) return t;
+      } catch (_) {}
+    }
+    return "";
+  }
+
+  function recorderBlobType(mime) {
+    if (mime && mime.startsWith("audio/mp4")) return "audio/mp4";
+    if (mime && mime.startsWith("audio/aac")) return "audio/aac";
+    return "audio/webm";
+  }
+
+  async function playViaWebAudio(b64) {
+    const ctx = await ensureAudioContext();
+    if (!ctx) throw new Error("AudioContext unavailable");
+    const bytes = base64ToUint8Array(b64);
+    // decodeAudioData si ArrayBuffer „odznačí“ — treba kópiu.
+    const copy = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    const audioBuffer = await ctx.decodeAudioData(copy);
     stopCurrentAudio();
-    if (!b64) return Promise.resolve();
-    const audio = new Audio(`data:audio/mpeg;base64,${b64}`);
-    // Spoľahlivá rýchlosť prehrávania (Edge % niekedy málo počuť).
+    const source = ctx.createBufferSource();
+    source.buffer = audioBuffer;
+    try {
+      source.playbackRate.value = currentSpeechRate();
+    } catch (_) {}
+    source.connect(ctx.destination);
+    state.currentAudioSource = source;
+    return new Promise((resolve, reject) => {
+      source.onended = () => {
+        if (state.currentAudioSource === source) state.currentAudioSource = null;
+        resolve();
+      };
+      try {
+        source.start(0);
+      } catch (err) {
+        state.currentAudioSource = null;
+        reject(err);
+      }
+    });
+  }
+
+  async function playViaHtmlAudio(b64) {
+    stopCurrentAudio();
+    const url = base64ToMp3ObjectUrl(b64);
+    const audio = state.audioEl || new Audio();
+    state.audioEl = audio;
+    audio.preload = "auto";
+    audio.setAttribute("playsinline", "true");
+    audio.playsInline = true;
+    audio.src = url;
     audio.playbackRate = currentSpeechRate();
     audio.preservesPitch = true;
     state.currentAudio = audio;
-    return new Promise((resolve) => {
-      let done = false;
-      const finish = () => {
-        if (done) return;
-        done = true;
-        if (state.currentAudio === audio) state.currentAudio = null;
-        resolve();
-      };
-      audio.addEventListener("ended", finish);
-      audio.addEventListener("error", finish);
-      audio.play().catch(finish);
-    });
+    try {
+      await audio.play();
+      await new Promise((resolve) => {
+        const finish = () => {
+          audio.removeEventListener("ended", finish);
+          audio.removeEventListener("error", finish);
+          resolve();
+        };
+        audio.addEventListener("ended", finish);
+        audio.addEventListener("error", finish);
+      });
+    } finally {
+      if (state.currentAudio === audio) state.currentAudio = null;
+      try {
+        URL.revokeObjectURL(url);
+      } catch (_) {}
+    }
+  }
+
+  async function playBase64Mp3(b64) {
+    if (!b64) return true;
+    stopCurrentAudio();
+    await ensureAudioContext();
+    // 1) Web Audio — spoľahlivejšie po async na iOS
+    try {
+      await playViaWebAudio(b64);
+      return true;
+    } catch (_) {
+      /* fallback */
+    }
+    // 2) HTMLAudioElement (odomknutý element)
+    try {
+      await playViaHtmlAudio(b64);
+      return true;
+    } catch (_) {
+      setStatus("Zvuk zablokovaný prehliadačom — ťukni na 🔊 pri odpovedi AI.", true);
+      return false;
+    }
   }
 
   async function blobToBase64(blob) {
@@ -252,12 +438,15 @@
   function showAuthGate() {
     $("authGate").classList.remove("hidden");
     $("appMain").classList.add("hidden");
+    $("bottomNav")?.classList.add("hidden");
+    document.body.classList.remove("lesson-open");
     loadLoginUsers().catch(() => {});
   }
 
   function showApp() {
     $("authGate").classList.add("hidden");
     $("appMain").classList.remove("hidden");
+    $("bottomNav")?.classList.remove("hidden");
     $("currentUserName").textContent = state.userName || "—";
     $("adminBadge").classList.toggle("hidden", !state.isAdmin);
     $("addUserBtn").classList.toggle("hidden", !state.isAdmin);
@@ -377,7 +566,16 @@
       setAuthMode("login");
       showApp();
       await bootApp();
-      setStatus(`Prihlásený: ${data.user.name}${data.user.is_admin ? " (Administrator)" : ""}`);
+      // Prompt len ak ešte nebolo udelené (localStorage / Permissions API).
+      if (state.micPermission !== "granted") {
+        await ensureMicPermission();
+      }
+      unlockAudioPlayback().catch(() => {});
+      if (state.micPermission === "granted") {
+        setStatus(`Prihlásený: ${data.user.name}${data.user.is_admin ? " (Administrator)" : ""} · mikrofón OK`);
+      } else {
+        setStatus(`Prihlásený: ${data.user.name}${data.user.is_admin ? " (Administrator)" : ""}`);
+      }
     } catch (e) {
       err.textContent = e.message || "Akcia zlyhala.";
       err.hidden = false;
@@ -395,6 +593,9 @@
     clearSession();
     showAuthGate();
   }
+
+  let settingsPersistTimer = null;
+  let settingsPersistInFlight = null;
 
   function settingsStorageKey(userId) {
     const uid = userId || effectiveUserId() || state.userId;
@@ -421,17 +622,60 @@
     }
   }
 
-  function saveLessonSettings() {
-    const uid = effectiveUserId() || state.userId;
-    if (!uid) return;
+  function writeLessonSettingsLocal(data, userId) {
+    const uid = userId || effectiveUserId() || state.userId;
+    if (!uid || !data) return;
+    try {
+      localStorage.setItem(settingsStorageKey(uid), JSON.stringify(data));
+    } catch (_) {}
+  }
+
+  function collectLessonSettings() {
     const data = {};
     for (const id of SETTINGS_FIELDS) {
       const el = $(id);
       if (el && el.value != null && el.value !== "") data[id] = el.value;
     }
+    return data;
+  }
+
+  function saveLessonSettings() {
+    const uid = effectiveUserId() || state.userId;
+    if (!uid) return;
+    const data = collectLessonSettings();
+    writeLessonSettingsLocal(data, uid);
+    schedulePersistLessonSettings(data, uid);
+  }
+
+  function schedulePersistLessonSettings(data, userId) {
+    const uid = userId || effectiveUserId() || state.userId;
+    if (!uid || !state.token) return;
+    if (settingsPersistTimer) clearTimeout(settingsPersistTimer);
+    settingsPersistTimer = setTimeout(() => {
+      settingsPersistTimer = null;
+      persistLessonSettings(data, uid).catch(() => {});
+    }, 350);
+  }
+
+  async function persistLessonSettings(data, userId) {
+    const uid = userId || effectiveUserId() || state.userId;
+    if (!uid || !state.token) return null;
+    const payload = data || collectLessonSettings();
+    const req = api("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: uid, settings: payload }),
+    });
+    settingsPersistInFlight = req;
     try {
-      localStorage.setItem(settingsStorageKey(uid), JSON.stringify(data));
-    } catch (_) {}
+      const res = await req;
+      const saved = res?.settings && typeof res.settings === "object" ? res.settings : payload;
+      writeLessonSettingsLocal(saved, uid);
+      if (state.meta) state.meta.lesson_settings = saved;
+      return saved;
+    } finally {
+      if (settingsPersistInFlight === req) settingsPersistInFlight = null;
+    }
   }
 
   function clearLessonSettings(userId) {
@@ -439,6 +683,13 @@
     try {
       localStorage.removeItem(settingsStorageKey(userId));
     } catch (_) {}
+  }
+
+  function mergeLessonSettingsPrefs(serverPrefs, localPrefs) {
+    const server = serverPrefs && typeof serverPrefs === "object" ? serverPrefs : {};
+    const local = localPrefs && typeof localPrefs === "object" ? localPrefs : {};
+    if (Object.keys(server).length) return { ...local, ...server };
+    return { ...local };
   }
 
   function applySelectValue(id, value) {
@@ -468,6 +719,8 @@
     applySelectValue("ttsProvider", saved.ttsProvider);
     applySelectValue("speechRate", saved.speechRate === "1.0" ? "1" : saved.speechRate);
     applySelectValue("silenceTimeout", saved.silenceTimeout);
+    applySelectValue("learningGoal", saved.learningGoal);
+    applySelectValue("dailyMinutes", saved.dailyMinutes);
     if (saved.ttsProvider) state.ttsProvider = saved.ttsProvider;
     syncModeUi();
   }
@@ -544,19 +797,26 @@
   function syncPttUi() {
     const pttOn = isPttMode();
     const btn = $("pttMicBtn");
-    btn?.classList.toggle("hidden", !pttOn);
-    $("recordConv")?.classList.toggle("hidden", pttOn);
+    // Vždy skryť staré hold tlačidlá — mic je len toggle.
+    $("recordConv")?.classList.toggle("hidden", true);
     $("stopConv")?.classList.toggle("hidden", true);
+    btn?.classList.toggle("hidden", !pttOn);
     if (!btn) return;
     const holding = !!state.ptt?.holding;
-    const busy = !!state.ptt?.processing;
+    const busy = !!state.ptt?.processing || !!state.ptt?.finalizing;
     btn.classList.toggle("is-holding", holding);
     btn.classList.toggle("is-busy", busy && !holding);
+    btn.setAttribute("aria-pressed", holding ? "true" : "false");
+    btn.setAttribute("title", "Ťukni = nahrávaj, ťukni znova = odošli");
+    btn.style.touchAction = "manipulation";
+    btn.style.userSelect = "none";
+    btn.style.webkitUserSelect = "none";
     const label = btn.querySelector(".ptt-label");
     if (label) {
-      if (holding) label.textContent = "Nahrávam";
-      else if (busy) label.textContent = "Spracúvam…";
-      else label.textContent = "Drž a hovor";
+      if (holding) label.textContent = "Stop / odošli";
+      else if (state.ptt?.finalizing) label.textContent = "Odosielam…";
+      else if (state.ptt?.processing) label.textContent = "Spracúvam…";
+      else label.textContent = "Ťukni a hovor";
     }
   }
 
@@ -637,7 +897,18 @@
     fillSelect($("silenceTimeout"), silenceOpts);
     $("silenceTimeout").value = String(state.meta.default_silence_timeout || 3);
     if (!$("silenceTimeout").value) $("silenceTimeout").value = "3";
-    applyLessonSettings();
+
+    const localPrefs = readLessonSettings(uid || undefined);
+    const serverPrefs = state.meta.lesson_settings || {};
+    const prefs = mergeLessonSettingsPrefs(serverPrefs, localPrefs);
+    applyLessonSettings(prefs);
+    if (Object.keys(prefs).length) {
+      writeLessonSettingsLocal(prefs, uid || undefined);
+      // Migrate browser-only prefs to server when file is still empty.
+      if (!Object.keys(serverPrefs).length && Object.keys(localPrefs).length) {
+        schedulePersistLessonSettings(prefs, uid || undefined);
+      }
+    }
     syncModeUi();
   }
 
@@ -646,14 +917,20 @@
     state.ttsProvider = provider;
     try {
       const data = await api(`/api/voices?provider=${encodeURIComponent(provider)}`);
-      const voices = data.voices || [];
+      // Edge vie vrátiť veľa hlasov — v selecte drž len preferované + max ~40.
+      let voices = data.voices || [];
+      if (provider === "edge" && voices.length > 40) {
+        voices = voices.slice(0, 40);
+      }
       $("voice").innerHTML = "";
+      const frag = document.createDocumentFragment();
       for (const v of voices) {
         const opt = document.createElement("option");
         opt.value = v.voice_id;
         opt.textContent = `${v.name}${v.likely_english ? "" : " (other)"}`;
-        $("voice").appendChild(opt);
+        frag.appendChild(opt);
       }
+      $("voice").appendChild(frag);
       const preferred =
         provider === "edge"
           ? state.meta.default_tts_provider === "edge"
@@ -662,7 +939,8 @@
           : state.meta.default_voice_id;
       if (preferred) $("voice").value = preferred;
       if (!$("voice").value && voices[0]) $("voice").value = voices[0].voice_id;
-      applySelectValue("voice", readLessonSettings().voice);
+      const voicePrefs = mergeLessonSettingsPrefs(state.meta?.lesson_settings, readLessonSettings());
+      applySelectValue("voice", voicePrefs.voice);
     } catch (err) {
       $("voice").innerHTML = "";
       const opt = document.createElement("option");
@@ -671,9 +949,73 @@
         ? "Default (nastav ELEVENLABS_API_KEY)"
         : "Default Edge voice";
       $("voice").appendChild(opt);
-      applySelectValue("voice", readLessonSettings().voice);
+      const voicePrefs = mergeLessonSettingsPrefs(state.meta?.lesson_settings, readLessonSettings());
+      applySelectValue("voice", voicePrefs.voice);
       setStatus(err.message, true);
     }
+  }
+
+  function learningKindLabel(kind) {
+    const map = {
+      vocabulary: "slovíčko",
+      reading_error: "čítanie",
+      comprehension: "zlá odpoveď",
+      question_gap: "nerozumel otázke",
+    };
+    return map[kind] || kind;
+  }
+
+  function formatDuration(sec) {
+    const s = Math.max(0, Number(sec) || 0);
+    if (s < 60) return `${s}s`;
+    const m = Math.round(s / 60);
+    if (m < 60) return `${m} min`;
+    const h = Math.floor(m / 60);
+    const rem = m % 60;
+    return rem ? `${h} h ${rem} min` : `${h} h`;
+  }
+
+  function renderStats(payload) {
+    const grid = $("statsGrid");
+    const recentEl = $("statsRecent");
+    const c = payload?.conversation || {};
+    if (grid && recentEl) {
+      const metrics = [
+        ["Konverzácie", String(c.total || 0)],
+        ["Séria dní", `${c.streak_days || 0} (max ${c.best_streak_days || 0})`],
+        ["Úspešnosť", `${c.success_rate ?? 0}%`],
+        ["Čas spolu", formatDuration(c.total_seconds || 0)],
+        ["Otázky", String(c.total_questions || 0)],
+        ["Zlé odpovede", String(c.total_wrongs || 0)],
+      ];
+      grid.innerHTML = metrics
+        .map(
+          ([label, value]) =>
+            `<div class="stats-metric"><strong>${escapeHtml(value)}</strong><span>${escapeHtml(label)}</span></div>`
+        )
+        .join("");
+
+      const recent = Array.isArray(c.recent) ? c.recent.slice(0, 8) : [];
+      if (!recent.length) {
+        recentEl.innerHTML = `<p class="muted">Zatiaľ žiadne ukončené konverzácie — po lekcii sa tu objavia.</p>`;
+      } else {
+        recentEl.innerHTML = recent
+          .map((r) => {
+            const when = String(r.ended_at || "").replace("T", " ").slice(0, 16);
+            const topic = r.free_debate ? "voľná debata" : r.topic || "konverzácia";
+            const right = `${r.questions || 0} ot. · ${r.success_rate ?? 0}% · ${formatDuration(r.duration_sec)}`;
+            return `<div class="stats-recent-row"><div><strong>${escapeHtml(topic)}</strong> <span class="stats-recent-meta">${escapeHtml(when)} · ${escapeHtml(r.level || "")}</span></div><div class="stats-recent-meta">${escapeHtml(right)}</div></div>`;
+          })
+          .join("");
+      }
+    }
+
+    window.__engUpdateHomeFromStats?.(payload);
+  }
+
+  async function loadStats() {
+    const data = await api(`/api/stats?user_id=${encodeURIComponent(effectiveUserId() || "")}`);
+    renderStats(data);
   }
 
   async function loadLearning() {
@@ -689,7 +1031,7 @@
       const tr = document.createElement("tr");
       tr.innerHTML = `
         <td><span class="sig-badge sig-${Math.min(10, Math.max(1, sig))}">${sig}/10</span></td>
-        <td>${escapeHtml(item.kind)}</td>
+        <td>${escapeHtml(learningKindLabel(item.kind))}</td>
         <td>${escapeHtml(item.word)}</td>
         <td>${escapeHtml(item.tip || item.translation_sk || "")}</td>
         <td>${escapeHtml(item.status)}</td>
@@ -791,6 +1133,8 @@
   }
 
   function showPanels(mode, phase) {
+    document.body.classList.add("lesson-open");
+    window.__engShowView?.("lesson");
     $("lesson").classList.remove("hidden");
     const debate = phase === "debate" || phase === "comprehension";
     const chatMode = mode === "conversation" || mode === "free_debate";
@@ -799,6 +1143,9 @@
     $("comprehensionPanel").classList.toggle("hidden", !debate);
     $("phaseBadge").textContent = phase || mode;
     state.readingPhase = phase;
+    if (mode !== "conversation") {
+      $("questionProgress")?.classList.add("hidden");
+    }
     syncPttUi();
   }
 
@@ -866,6 +1213,33 @@
     }
   }
 
+  function updateQuestionProgress(data) {
+    const el = $("questionProgress");
+    if (!el) return;
+    const isConv = state.mode === "conversation";
+    if (!isConv) {
+      el.classList.add("hidden");
+      return;
+    }
+    const asked = Number(data?.questions_asked ?? 0);
+    const target = Number(data?.question_target ?? data?.min_questions ?? 20);
+    const phase = data?.conversation_phase || data?.phase || "active";
+    if (phase === "active" || phase === "awaiting_continue" || phase === "done" || phase === "abandoned") {
+      state.conversationPhase = phase;
+    }
+    const awaiting = !!data?.awaiting_continue || phase === "awaiting_continue";
+    el.classList.remove("hidden", "is-continue", "is-done");
+    if (phase === "done") {
+      el.classList.add("is-done");
+      el.textContent = `Hotovo — otázky: ${asked} (cieľ bol ${target})`;
+    } else if (awaiting) {
+      el.classList.add("is-continue");
+      el.textContent = `Otázky: ${asked} / ${target} — AI sa pýta, či chceš pokračovať`;
+    } else {
+      el.textContent = `Otázky: ${asked} / ${target}`;
+    }
+  }
+
   function appendChat(role, text, opts = {}) {
     const div = document.createElement("div");
     div.className = `bubble ${role}`;
@@ -908,7 +1282,7 @@
   }
 
   function buildStartPayload(restart = false) {
-    return {
+    const payload = {
       mode: $("mode").value,
       level: $("level").value,
       topic: $("topic").value,
@@ -923,6 +1297,10 @@
       user_id: effectiveUserId(),
       restart: !!restart,
     };
+    if (state.pendingScenarioId) {
+      payload.scenario_id = state.pendingScenarioId;
+    }
+    return payload;
   }
 
   async function startLesson(restart = false, forceMode = null) {
@@ -936,12 +1314,18 @@
       if ($(id)) $(id).disabled = true;
     }
     try {
+    // Skôr než speech UI: mic prompt len ak ešte nie je zapamätaný grant.
+    if (state.micPermission !== "granted") {
+      await ensureMicPermission();
+    }
+    unlockAudioPlayback().catch(() => {});
     await stopPtt();
     if (forceMode) $("mode").value = forceMode;
     syncModeUi();
     const payload = buildStartPayload(restart);
     state.lastStartPayload = payload;
     state.isPractice = false;
+    state.pendingScenarioId = null;
     const reading = payload.mode === "reading";
     const free = payload.mode === "free_debate";
     setStatus(
@@ -964,6 +1348,7 @@
       });
       state.sessionId = data.session_id;
       state.mode = data.mode;
+      state.conversationPhase = data.conversation_phase || (data.mode === "conversation" || data.mode === "free_debate" ? "active" : null);
       state.voiceId = payload.voice_id;
       state.ttsProvider = payload.tts_provider;
       state.userId = data.user_id || payload.user_id;
@@ -975,10 +1360,14 @@
           ? (data.suggested_topic
             ? `Voľná debata — ${data.suggested_topic}`
             : "Voľná debata")
-          : (restart ? "Reštart — konverzácia" : "Konverzácia");
+          : (data.scenario_title
+            ? data.scenario_title
+            : (restart ? "Reštart — konverzácia" : "Konverzácia"));
         showPanels(data.mode, data.phase || data.mode);
         $("chat").innerHTML = "";
         appendChat("assistant", data.reply, { audioBase64: data.audio_base64 });
+        updateQuestionProgress(data);
+        loadStats().catch(() => {});
         const due = data.due_words?.length ? `Opakujeme: ${data.due_words.join(", ")}. ` : "";
         const topicHint = data.suggested_topic ? `Návrh témy: ${data.suggested_topic}. ` : "";
         const facts = data.learned_facts?.length
@@ -987,14 +1376,17 @@
         setStatus(
           data.mode === "free_debate"
             ? `${topicHint}${due}${facts}AI hovorí úvod…`
-            : `${due}Otázky: ${data.questions_asked || 0}/${data.min_questions}`
+            : `${due}Otázky: ${data.questions_asked || 0}/${data.question_target || data.min_questions}`
         );
         if (data.mode === "free_debate" || data.mode === "conversation") {
           if (data.mode === "free_debate") setStatus("AI hovorí úvod…");
           await playBase64Mp3(data.audio_base64);
           ensurePtt();
+          bindPttMicButton(true);
           syncPttUi();
           pttReadyStatus();
+          document.body.classList.add("lesson-open");
+          window.__engShowView?.("lesson");
         } else {
           await playBase64Mp3(data.audio_base64);
           syncPttUi();
@@ -1072,14 +1464,37 @@
         }),
       });
       appendChat("assistant", data.reply, { audioBase64: data.audio_base64 });
-      if (data.learned_facts?.length) {
-        setStatus(`Zapísané o tebe: ${data.learned_facts.join("; ")}. Otázky: ${data.questions_asked}/${data.min_questions}`);
+      updateQuestionProgress(data);
+      const confusedNote = data.confused?.length
+        ? `Zapísané: nerozumel otázke — ${data.confused.map((c) => c.summary).filter(Boolean).join("; ")}. `
+        : "";
+      const wrongNote = data.wrongs?.length
+        ? `Zapísané zlá odpoveď — ${data.wrongs.map((w) => w.summary).filter(Boolean).join("; ")}. `
+        : "";
+      const qLabel = `Otázky: ${data.questions_asked}/${data.question_target || data.min_questions}`;
+      if (data.awaiting_continue || data.phase === "awaiting_continue") {
+        setStatus(`${qLabel} — AI sa pýta, či chceš pokračovať.`);
+      } else if (data.phase === "done") {
+        setStatus(`Lekcia ukončená (${qLabel}). Môžeš spustiť novú.`);
+      } else if (data.learned_facts?.length) {
+        setStatus(`Zapísané o tebe: ${data.learned_facts.join("; ")}. ${qLabel}`);
+      } else if (wrongNote) {
+        setStatus(`${wrongNote}${qLabel}`);
+      } else if (confusedNote) {
+        setStatus(`${confusedNote}AI to preformuluje.`);
       } else if (state.mode === "free_debate") {
         setStatus("AI odpovedá…");
       } else {
-        setStatus(`Otázky: ${data.questions_asked}/${data.min_questions}`);
+        setStatus(qLabel);
       }
       await loadLearning();
+      if (data.stats) renderStats(data.stats);
+      else if (data.phase === "done") await loadStats().catch(() => {});
+      window.__engShowTurnFeedback?.(data);
+      window.__engShowRepeatBanner?.(data);
+      if (data.phase === "done" || data.conversation_phase === "done" || data.recap) {
+        window.__engShowRecap?.(data);
+      }
       ptt.processing = false;
       syncPttUi();
       await playBase64Mp3(data.audio_base64);
@@ -1098,7 +1513,7 @@
       return;
     }
     if (isPttMode() && kind === "conversation") {
-      setStatus("Drž tlačidlo mikrofónu.");
+      setStatus("Ťukni na mikrofón (zelené tlačidlo).");
       return;
     }
     const stream = await navigator.mediaDevices.getUserMedia({
@@ -1152,6 +1567,111 @@
     };
   }
 
+  async function ensureMicPermission(opts = {}) {
+    const quiet = !!opts.quiet;
+    const allowPrompt = opts.prompt !== false;
+    if (!navigator.mediaDevices?.getUserMedia) {
+      state.micPermission = "unsupported";
+      if (!quiet) setStatus("Tento prehliadač nepodporuje mikrofón.", true);
+      return false;
+    }
+
+    // 1) Už máme grant v pamäti / localStorage — nevolaj znova getUserMedia (Safari by sa znova pýtala).
+    if (state.micPermission === "granted") return true;
+    try {
+      const stored = localStorage.getItem(MIC_KEY);
+      if (stored === "granted") {
+        state.micPermission = "granted";
+        return true;
+      }
+      if (stored === "denied") state.micPermission = "denied";
+    } catch (_) {}
+
+    // 2) Permissions API (Chrome; Safari často nepodporuje)
+    try {
+      if (navigator.permissions?.query) {
+        const status = await navigator.permissions.query({ name: "microphone" });
+        if (status.state === "granted") {
+          state.micPermission = "granted";
+          try {
+            localStorage.setItem(MIC_KEY, "granted");
+          } catch (_) {}
+          return true;
+        }
+        if (status.state === "denied") {
+          state.micPermission = "denied";
+          try {
+            localStorage.setItem(MIC_KEY, "denied");
+          } catch (_) {}
+          if (!quiet) {
+            setStatus(
+              "Mikrofón je zablokovaný. V Safari: Aa → Webová stránka → Mikrofón → Povoliť.",
+              true
+            );
+          }
+          return false;
+        }
+        status.onchange = () => {
+          if (status.state === "granted" || status.state === "denied") {
+            state.micPermission = status.state;
+            try {
+              localStorage.setItem(MIC_KEY, status.state);
+            } catch (_) {}
+          }
+        };
+      }
+    } catch (_) {
+      /* ignore */
+    }
+
+    if (state.micPermission === "denied") {
+      if (!quiet) {
+        setStatus(
+          "Mikrofón je zablokovaný. V Safari: Aa → Webová stránka → Mikrofón → Povoliť.",
+          true
+        );
+      }
+      return false;
+    }
+
+    // 3) Prompt len ak ešte nebolo udelené (a volajúci to chce — pri refreshi nie).
+    if (!allowPrompt) return false;
+
+    try {
+      if (!quiet) setStatus("Vyžadujem prístup k mikrofónu…");
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: micAudioConstraints(),
+      });
+      stream.getTracks().forEach((t) => {
+        try {
+          t.stop();
+        } catch (_) {}
+      });
+      state.micPermission = "granted";
+      try {
+        localStorage.setItem(MIC_KEY, "granted");
+      } catch (_) {}
+      unlockAudioPlayback().catch(() => {});
+      if (!quiet) setStatus("Mikrofón povolený — nabudúce sa už nebudem pýtať.");
+      return true;
+    } catch (err) {
+      state.micPermission = "denied";
+      try {
+        localStorage.setItem(MIC_KEY, "denied");
+      } catch (_) {}
+      const msg = String(err?.message || err || "");
+      if (!quiet) {
+        setStatus(
+          /denied|not allowed|permission/i.test(msg)
+            ? "Mikrofón zamietnutý. Povoľ ho pre túto stránku a skús znova."
+            : `Mikrofón: ${msg}`,
+          true
+        );
+      }
+      return false;
+    }
+  }
+
   function ensurePtt() {
     if (!state.ptt) {
       state.ptt = {
@@ -1182,6 +1702,55 @@
       ptt.abortController = null;
     }
     if (ptt) ptt.processing = false;
+    syncPttUi();
+  }
+
+  function clearLessonUi() {
+    state.sessionId = null;
+    state.mode = null;
+    state.conversationPhase = null;
+    state.lastStartPayload = null;
+    state.passageText = "";
+    state.passageAudio = null;
+    state.isPractice = false;
+    const chat = $("chat");
+    if (chat) chat.innerHTML = "";
+    $("questionProgress")?.classList.add("hidden");
+    $("turnFeedback")?.classList.add("hidden");
+    $("lesson")?.classList.add("hidden");
+    $("conversationPanel")?.classList.add("hidden");
+    $("readingPanel")?.classList.add("hidden");
+    $("comprehensionPanel")?.classList.add("hidden");
+    document.body.classList.remove("lesson-open");
+    window.__engShowView?.("home");
+  }
+
+  async function abandonCurrentLesson() {
+    if (!state.sessionId) {
+      clearLessonUi();
+      setStatus("Žiadna aktívna lekcia.");
+      return;
+    }
+    if (!confirm("Naozaj zrušiť lekciu? Nebude v štatistikách a nedá sa k nej vrátiť.")) {
+      return;
+    }
+    const sid = state.sessionId;
+    interruptAiSpeech();
+    await stopPtt().catch(() => {});
+    try {
+      await api("/api/session/abandon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sid }),
+      });
+    } catch (err) {
+      // Aj pri chybe vyčisti UI — session často už neexistuje.
+      setStatus(err.message || String(err), true);
+    }
+    clearLessonUi();
+    syncPttUi();
+    await loadStats().catch(() => {});
+    setStatus("Lekcia zrušená — bez zápisu do štatistík.");
   }
 
   function clearPttPauseTimer() {
@@ -1223,16 +1792,29 @@
     ptt.pendingSegments = [];
   }
 
+  function releasePttStream(ptt) {
+    if (!ptt) return;
+    try {
+      ptt.stream?.getTracks?.().forEach((t) => {
+        try {
+          t.stop();
+        } catch (_) {}
+      });
+    } catch (_) {}
+    ptt.stream = null;
+  }
+
   function stopAndCollectPttBlob(ptt) {
     return new Promise((resolve) => {
       const finish = () => {
         const parts = [...(ptt.pendingSegments || [])];
         if (ptt.chunks?.length) parts.push(...ptt.chunks);
+        const mime = recorderBlobType(ptt.recorderMime || parts[0]?.type || "audio/webm");
         ptt.pendingSegments = [];
         ptt.chunks = [];
         ptt.recorder = null;
         ptt.recording = false;
-        resolve(new Blob(parts, { type: "audio/webm" }));
+        resolve(new Blob(parts, { type: mime }));
       };
 
       const recorder = ptt.recorder;
@@ -1271,11 +1853,11 @@
         flushPttAndUpload(ptt).catch((err) => setStatus(err.message, true));
         return;
       }
-      setStatus(`Pauza… o ${left}s odošlem AI. (Znova drž = pokračuj v nahrávaní.)`);
+      setStatus(`Pauza… o ${left}s odošlem AI. (Ťukni znova = pokračuj v nahrávaní.)`);
       left -= 1;
       ptt.pauseTimer = setTimeout(tickPause, 1000);
     };
-    setStatus(`Pauza ${waitSec} s… potom odošlem AI. (Znova drž = pokračuj v nahrávaní.)`);
+    setStatus(`Pauza ${waitSec} s… potom odošlem AI. (Ťukni znova = pokračuj v nahrávaní.)`);
     tickPause();
   }
 
@@ -1286,14 +1868,17 @@
     setStatus("Spracúvam hlas…");
     try {
       const blob = await stopAndCollectPttBlob(ptt);
-      if (blob.size < 800) {
-        setStatus("Príliš krátky záznam — drž mikrofón dlhšie.");
+      // Uvoľni mic hneď — inak iOS nechá oranžový indikátor zapnutý.
+      releasePttStream(ptt);
+      if (blob.size < 1200) {
+        setStatus("Príliš krátky záznam / ticho — ťukni na mikrofón a hovor jasnejšie.");
         syncPttUi();
         return;
       }
       await uploadConversation(blob, { fromPtt: true });
     } finally {
       ptt.finalizing = false;
+      releasePttStream(ptt);
       syncPttUi();
     }
   }
@@ -1307,148 +1892,221 @@
     clearPttPauseTimer();
     interruptAiSpeech();
     discardPttUtterance(ptt);
-    ptt.stream?.getTracks?.().forEach((t) => t.stop());
+    releasePttStream(ptt);
+    stopAudioKeepalive();
     state.ptt = null;
     syncPttUi();
   }
 
   function pttReadyStatus() {
-    setStatus(`Drž mikrofón a hovor. Po pustení počkám ${silenceTimeoutSec()} s a odošlem AI.`);
+    setStatus("Pripravené — ťukni na mikrofón (ďalšie ťuknutie zastaví a odošle).");
   }
 
-  async function pttStartHold(e) {
-    if (e.button != null && e.button !== 0) return;
+  function resetStuckPtt(ptt) {
+    if (!ptt) return;
+    if (ptt.finalizing) ptt.finalizing = false;
+    if (ptt.holding && !ptt.recording) {
+      ptt.holding = false;
+      ptt.pointerId = null;
+    }
+    if (ptt.recording && ptt.recorder && ptt.recorder.state !== "recording" && ptt.recorder.state !== "paused") {
+      ptt.recording = false;
+      ptt.recorder = null;
+    }
+  }
+
+  async function pttToggleMic(e) {
+    if (e?.button != null && e.button !== 0) return;
     if (!state.sessionId || !isPttMode()) {
-      setStatus("Najprv spusti konverzáciu alebo voľnú debatu.", true);
+      setStatus("Najprv spusti konverzáciu (Home → Dnešných 15 min / Spustiť).", true);
+      return;
+    }
+    if (state.conversationPhase === "done" || state.conversationPhase === "abandoned") {
+      setStatus("Lekcia už bola ukončená — spúšťam novú…");
+      await startLesson(false);
       return;
     }
     const ptt = ensurePtt();
-    if (ptt.holding || ptt.finalizing) return;
-    if (ptt.recording && ptt.recorder?.state === "recording") return;
+    resetStuckPtt(ptt);
+    if (ptt.finalizing || ptt.processing) {
+      // Preruš AI / odosielanie a začni novú nahrávku.
+      interruptAiSpeech();
+      ptt.finalizing = false;
+    }
+    if (ptt.holding || ptt.recording) {
+      await pttStopRecordingAndSend();
+      return;
+    }
+    await pttStartRecording();
+  }
 
-    e.preventDefault();
-    try {
-      e.currentTarget.setPointerCapture?.(e.pointerId);
-    } catch (_) {}
-    ptt.pointerId = e.pointerId;
-
-    // Barge-in počas AI odpovede = nová výpoveď; počas pauzy = pokračovanie.
-    const bargeIn = !!(ptt.processing || state.currentAudio || ptt.abortController);
-    const continuing = !bargeIn && pttHasPendingUtterance(ptt);
+  async function pttStartRecording() {
+    if (!window.MediaRecorder) {
+      setStatus("Tento prehliadač nepodporuje nahrávanie hlasu (MediaRecorder).", true);
+      return;
+    }
+    const ptt = ensurePtt();
+    if (ptt.holding || ptt.recording) return;
 
     clearPttPauseTimer();
     interruptAiSpeech();
-
-    if (!continuing) {
-      discardPttUtterance(ptt);
-    }
+    discardPttUtterance(ptt);
 
     ptt.holding = true;
+    ptt.recording = false;
     syncPttUi();
-    setStatus(
-      continuing
-        ? "Pokračujem v nahrávaní… Keď skončíš, pusť tlačidlo."
-        : "Nahrávam… hovor. Keď skončíš, pusť tlačidlo."
-    );
+    setStatus("Nahrávam… ťukni znova na Stop / odošli.");
+    unlockAudioPlayback().catch(() => {});
 
     try {
       if (!ptt.stream || ptt.stream.getTracks().every((t) => t.readyState === "ended")) {
         ptt.stream = await navigator.mediaDevices.getUserMedia({
           audio: micAudioConstraints(),
         });
-      }
-
-      if (continuing && ptt.recorder?.state === "paused") {
+        state.micPermission = "granted";
         try {
-          ptt.recorder.resume();
-          ptt.recording = true;
-          return;
-        } catch (_) {
-          // fallback: nový segment na tom istom streame
-          try {
-            ptt.recorder.onstop = null;
-            ptt.recorder.stop();
-          } catch (_) {}
-          if (ptt.chunks?.length) {
-            ptt.pendingSegments.push(new Blob(ptt.chunks, { type: "audio/webm" }));
-            ptt.chunks = [];
-          }
-          ptt.recorder = null;
-        }
+          localStorage.setItem(MIC_KEY, "granted");
+        } catch (_) {}
+      }
+      if (!state.ptt || !ptt.holding) {
+        releasePttStream(ptt);
+        return;
       }
 
       ptt.chunks = [];
-      const recorder = new MediaRecorder(ptt.stream);
+      const mime = pickRecorderMimeType();
+      ptt.recorderMime = mime || "audio/mp4";
+      let recorder;
+      try {
+        recorder = mime
+          ? new MediaRecorder(ptt.stream, { mimeType: mime })
+          : new MediaRecorder(ptt.stream);
+      } catch (_) {
+        recorder = new MediaRecorder(ptt.stream);
+        ptt.recorderMime = recorder.mimeType || "audio/mp4";
+      }
       ptt.recorder = recorder;
       recorder.ondataavailable = (ev) => {
         if (ev.data?.size > 0) ptt.chunks.push(ev.data);
       };
-      recorder.start(200);
+      recorder.start(250);
       ptt.recording = true;
+      syncPttUi();
     } catch (err) {
       ptt.holding = false;
       ptt.recording = false;
+      releasePttStream(ptt);
       syncPttUi();
-      setStatus(`Mikrofón: ${err.message}`, true);
+      setStatus(`Mikrofón: ${err.message || err}`, true);
     }
   }
 
-  function pttEndHold(e) {
+  async function pttStopRecordingAndSend() {
     const ptt = state.ptt;
-    if (!ptt?.holding) return;
-    if (e?.pointerId != null && ptt.pointerId != null && e.pointerId !== ptt.pointerId) return;
+    if (!ptt) return;
+    if (!ptt.holding && !ptt.recording) return;
 
     ptt.holding = false;
     ptt.pointerId = null;
     syncPttUi();
+    clearPttPauseTimer();
 
     if (!ptt.recording || !ptt.recorder) {
-      if (pttHasPendingUtterance(ptt)) schedulePttSend(ptt);
-      else pttReadyStatus();
+      if (pttHasPendingUtterance(ptt)) {
+        await flushPttAndUpload(ptt);
+      } else {
+        releasePttStream(ptt);
+        pttReadyStatus();
+      }
       return;
     }
 
     const recorder = ptt.recorder;
+    const blobType = recorderBlobType(ptt.recorderMime || recorder.mimeType || "");
 
-    // Preferuj pause/resume — jedna súvislá webm nahrávka naprieč hold/release.
-    if (recorderCanPause(recorder) && recorder.state === "recording") {
+    await new Promise((resolve) => {
+      recorder.onstop = () => {
+        ptt.recording = false;
+        ptt.recorder = null;
+        if (ptt.chunks?.length) {
+          ptt.pendingSegments.push(new Blob(ptt.chunks, { type: blobType }));
+          ptt.chunks = [];
+        }
+        releasePttStream(ptt);
+        resolve();
+      };
       try {
         try {
           recorder.requestData?.();
         } catch (_) {}
-        recorder.pause();
-        ptt.recording = false;
-        schedulePttSend(ptt);
-        syncPttUi();
-        return;
+        if (recorder.state === "paused") {
+          try {
+            recorder.resume();
+          } catch (_) {}
+        }
+        if (recorder.state !== "inactive") recorder.stop();
+        else recorder.onstop();
       } catch (_) {
-        // pokračuj stop/start fallbackom nižšie
+        ptt.recording = false;
+        ptt.recorder = null;
+        releasePttStream(ptt);
+        resolve();
       }
+    });
+
+    if (!pttHasPendingUtterance(ptt)) {
+      setStatus("Príliš krátky záznam — ťukni znova a hovor dlhšie.");
+      syncPttUi();
+      return;
+    }
+    // Toggle režim: po druhom ťuknutí odošli hneď (bez čakania na ticho).
+    await flushPttAndUpload(ptt);
+  }
+
+  function bindPttMicButton(force = false) {
+    let mic = $("pttMicBtn");
+    if (!mic) return;
+
+    // Odstráň staré hold/pointer handlery (Phase A / cache) klonovaním.
+    if (force || mic.dataset.pttMode !== "toggle") {
+      const neo = mic.cloneNode(true);
+      mic.parentNode.replaceChild(neo, mic);
+      mic = $("pttMicBtn");
+      if (!mic) return;
+    } else if (mic.dataset.pttBound === "1") {
+      return;
     }
 
-    recorder.onstop = () => {
-      ptt.recording = false;
-      ptt.recorder = null;
-      if (ptt.chunks?.length) {
-        ptt.pendingSegments.push(new Blob(ptt.chunks, { type: "audio/webm" }));
-        ptt.chunks = [];
-      }
-      if (!pttHasPendingUtterance(ptt)) {
-        setStatus("Príliš krátky záznam — drž mikrofón dlhšie.");
-        syncPttUi();
-        return;
-      }
-      schedulePttSend(ptt);
+    mic.dataset.pttBound = "1";
+    mic.dataset.pttMode = "toggle";
+    mic.style.touchAction = "manipulation";
+    mic.style.userSelect = "none";
+    mic.style.webkitUserSelect = "none";
+    // Explicitne žiadny hold.
+    mic.onpointerdown = null;
+    mic.onpointerup = null;
+    mic.onpointerleave = null;
+    mic.onmousedown = null;
+    mic.onmouseup = null;
+    mic.ontouchstart = null;
+    mic.ontouchend = null;
+
+    let lastToggleAt = 0;
+    const onToggle = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const now = Date.now();
+      if (now - lastToggleAt < 400) return;
+      lastToggleAt = now;
+      pttToggleMic(e).catch((err) => setStatus(err.message || String(err), true));
     };
 
-    try {
-      if (recorder.state !== "inactive") recorder.stop();
-      else recorder.onstop();
-    } catch (_) {
-      ptt.recording = false;
-      ptt.recorder = null;
-      if (pttHasPendingUtterance(ptt)) schedulePttSend(ptt);
-    }
+    // Toggle: jedno ťuknutie = štart, druhé = stop + odoslať (nie hold / push).
+    mic.addEventListener("click", onToggle);
+    mic.addEventListener("keydown", (e) => {
+      if (e.key === " " || e.key === "Enter") onToggle(e);
+    });
+    mic.addEventListener("contextmenu", (e) => e.preventDefault());
     syncPttUi();
   }
 
@@ -1475,7 +2133,10 @@
     syncPttUi();
     const fd = new FormData();
     fd.append("session_id", state.sessionId);
-    fd.append("audio", blob, "utterance.webm");
+    const ext = (blob.type || "").includes("mp4") || (blob.type || "").includes("aac")
+      ? "mp4"
+      : "webm";
+    fd.append("audio", blob, `utterance.${ext}`);
     fd.append("speech_rate", String(currentSpeechRate()));
     const controller = new AbortController();
     ptt.abortController = controller;
@@ -1488,25 +2149,69 @@
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.detail || "Chyba");
-      appendChat("user", data.transcript || "(audio)");
+      if (data.no_speech) {
+        setStatus(data.detail || "Nepočul som ťa — skús znova.");
+        if (fromPtt && isPttMode() && state.sessionId) pttReadyStatus();
+        return;
+      }
+      const shown =
+        data.transcript_raw || data.transcript_display || data.said || data.transcript || "(audio)";
+      appendChat("user", shown);
       appendChat("assistant", data.reply, { audioBase64: data.audio_base64 });
-      if (data.learned_facts?.length) {
-        setStatus(`Zapísané o tebe: ${data.learned_facts.join("; ")}`);
-      } else if (state.mode === "free_debate") {
-        setStatus("AI odpovedá…");
+      updateQuestionProgress(data);
+      if ((data.wrongs && data.wrongs.length) || (data.confused && data.confused.length) || (data.unknowns && data.unknowns.length) || data.logged_to_progress) {
+        loadLearning().catch(() => {});
+      }
+      const confusedNote = data.confused?.length
+        ? `Zapísané: nerozumel otázke — ${data.confused.map((c) => c.summary).filter(Boolean).join("; ")}. `
+        : "";
+      const wrongNote = data.wrongs?.length
+        ? `Zlá odpoveď — ${data.wrongs.map((w) => w.summary).filter(Boolean).join("; ")}. `
+        : "";
+      const qLabel = `Otázky: ${data.questions_asked}/${data.question_target || data.min_questions}`;
+      if (data.needs_repeat || data.awaiting_repeat) {
+        setStatus(
+          data.unclear
+            ? "AI si nie je istá zachytením — zopakuj odpoveď do mikrofónu."
+            : "Skús odpoveď ešte raz jasnejšie."
+        );
+      } else if (data.logged_to_progress) {
+        setStatus(`Zapísané do progresu. ${qLabel}`);
+      } else if (data.awaiting_continue || data.phase === "awaiting_continue") {
+        setStatus(`${qLabel} — AI sa pýta, či chceš pokračovať.`);
+      } else if (data.phase === "done") {
+        setStatus(`Lekcia ukončená (${qLabel}).`);
+      } else if (data.learned_facts?.length) {
+        setStatus(`Zapísané o tebe: ${data.learned_facts.join("; ")}. ${qLabel}`);
+      } else if (wrongNote) {
+        setStatus(`${wrongNote}${qLabel}`);
+      } else if (confusedNote) {
+        setStatus(`${confusedNote}AI to preformuluje.`);
       } else {
-        setStatus(`Otázky: ${data.questions_asked}/${data.min_questions}`);
+        setStatus(`${qLabel} — AI hovorí…`);
       }
       await loadLearning();
+      if (data.stats) renderStats(data.stats);
+      else if (data.phase === "done") await loadStats().catch(() => {});
+      window.__engShowTurnFeedback?.(data);
+      window.__engShowRepeatBanner?.(data);
+      if (data.phase === "done" || data.conversation_phase === "done" || data.recap) {
+        window.__engShowRecap?.(data);
+      }
       ptt.processing = false;
       syncPttUi();
-      await playBase64Mp3(data.audio_base64);
+      await unlockAudioPlayback();
+      const played = await playBase64Mp3(data.audio_base64);
       if (fromPtt && isPttMode() && state.sessionId) {
-        pttReadyStatus();
+        if (played) {
+          if (wrongNote) setStatus(wrongNote.trim());
+          else if (confusedNote) setStatus(confusedNote.trim());
+          else pttReadyStatus();
+        }
       }
     } catch (err) {
       if (err?.name === "AbortError") {
-        setStatus("AI prerušená — drž mikrofón a hovor.");
+        setStatus("AI prerušená — ťukni na mikrofón a hovor.");
       } else {
         const msg = String(err.message || err);
         if (/session not found/i.test(msg)) {
@@ -1971,10 +2676,18 @@
   }
 
   async function bootApp() {
+    window.__engStartLesson = (restart = false, forceMode = null) => startLesson(restart, forceMode);
+    window.__engSaveLessonSettings = () => saveLessonSettings();
+    window.__engSetPendingScenario = (id) => {
+      state.pendingScenarioId = id || null;
+    };
     await loadManagedUsers();
     await loadMeta();
     await loadVoices();
     await loadLearning();
+    await loadStats().catch(() => {});
+    window.__engShowView?.("home");
+    window.__engLoadScenarios?.().catch(() => {});
     const health = await api("/api/health");
     if (!health.llm_providers.length) {
       setStatus("Chýba LLM API kľúč (OpenAI / Gemini / Mistral). Edge TTS funguje bez kľúča.", true);
@@ -2017,6 +2730,13 @@
   $("startBtn").addEventListener("click", () => startLesson(false));
   $("freeDebateBtn").addEventListener("click", () => startLesson(false, "free_debate"));
   $("restartBtn").addEventListener("click", () => startLesson(true));
+  $("interruptLessonBtn")?.addEventListener("click", () => {
+    interruptAiSpeech();
+    setStatus("AI prerušená — môžeš pokračovať alebo zrušiť lekciu.");
+  });
+  $("abandonLessonBtn")?.addEventListener("click", () => {
+    abandonCurrentLesson().catch((e) => setStatus(e.message, true));
+  });
   $("refreshLearning").addEventListener("click", () => loadLearning().catch((e) => setStatus(e.message, true)));
   $("practiceOpenBtn").addEventListener("click", openPracticePanel);
   $("practiceCancelBtn").addEventListener("click", closePracticePanel);
@@ -2040,16 +2760,7 @@
   $("recordConv").addEventListener("click", () => startRecording("conversation").catch((e) => setStatus(e.message, true)));
   $("stopConv").addEventListener("click", () => stopRecording("conversation"));
   {
-    const mic = $("pttMicBtn");
-    if (mic) {
-      mic.addEventListener("pointerdown", (e) => {
-        pttStartHold(e).catch((err) => setStatus(err.message, true));
-      });
-      mic.addEventListener("pointerup", (e) => pttEndHold(e));
-      mic.addEventListener("pointercancel", (e) => pttEndHold(e));
-      mic.addEventListener("lostpointercapture", (e) => pttEndHold(e));
-      mic.addEventListener("contextmenu", (e) => e.preventDefault());
-    }
+    bindPttMicButton(true);
   }
   $("recordComp").addEventListener("click", () => startRecording("comprehension").catch((e) => setStatus(e.message, true)));
   $("stopComp").addEventListener("click", () => stopRecording("comprehension"));
@@ -2068,6 +2779,7 @@
       await loadMeta();
       await loadVoices();
       await loadLearning();
+      await loadStats().catch(() => {});
       const label = $("manageUserSelect").selectedOptions[0]?.textContent || state.managedUserId;
       setStatus(`Spravuješ účet: ${label}`);
     } catch (err) {
@@ -2098,6 +2810,21 @@
 
   (async () => {
     setAuthMode("login");
+    // Pri skrytí/zatvorení stránky uvoľni audio (ochrana pred RAM na iOS).
+    const cleanupAudio = () => {
+      try {
+        stopCurrentAudio();
+        stopAudioKeepalive();
+        if (state.audioContext && state.audioContext.state !== "closed") {
+          state.audioContext.suspend().catch(() => {});
+        }
+      } catch (_) {}
+    };
+    window.addEventListener("pagehide", cleanupAudio);
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) cleanupAudio();
+    });
+
     if (!state.token) {
       showAuthGate();
       return;
@@ -2107,6 +2834,15 @@
       saveToken(state.token, me.user);
       showApp();
       await bootApp();
+      // Pri refreshi NEVYŽADUJ prompt znova — len localStorage / Permissions API.
+      await ensureMicPermission({ quiet: true, prompt: false });
+      if (state.micPermission === "granted") {
+        setStatus("Pripravené. Mikrofón je už povolený.");
+      } else if (state.micPermission === "denied") {
+        setStatus("Mikrofón je zablokovaný v prehliadači — povoľ ho v nastaveniach stránky.", true);
+      } else {
+        setStatus("Mikrofón ešte nie je povolený — pri Štart / Voľná debata ho vyžiadam.");
+      }
     } catch (_) {
       clearSession();
       showAuthGate();
