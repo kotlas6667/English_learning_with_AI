@@ -27,6 +27,11 @@ _SAID_TAG = re.compile(
     r"\[\[said:(?P<said>[^\]]+)\]\]",
     re.IGNORECASE,
 )
+# Tutor is unsure the STT capture matches what the learner said → ask to repeat.
+_UNCLEAR_TAG = re.compile(
+    r"\[\[unclear:(?P<reason>[^\]]+)\]\]",
+    re.IGNORECASE,
+)
 # Pedagogically wrong answer in conversation → comprehension store.
 _WRONG_TAG = re.compile(
     r"\[\[wrong:(?P<summary>[^|\]]+)(?:\|(?P<note>[^\]]+))?\]\]",
@@ -171,6 +176,47 @@ def parse_said_tag(text: str) -> tuple[str, str | None]:
 
     cleaned = _SAID_TAG.sub(_repl, text)
     return re.sub(r"[ \t]{2,}", " ", cleaned).strip(), said
+
+
+def parse_unclear_tag(text: str) -> tuple[str, str | None]:
+    """Extract [[unclear:reason]] — STT capture is uncertain (last tag wins)."""
+    reason: str | None = None
+
+    def _repl(match: re.Match[str]) -> str:
+        nonlocal reason
+        value = (match.group("reason") or "").strip()
+        if value:
+            reason = value
+        return ""
+
+    cleaned = _UNCLEAR_TAG.sub(_repl, text)
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip(), reason
+
+
+def _normalize_words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9']+", (text or "").lower())
+
+
+def sanitize_said(raw: str, said: str | None) -> str | None:
+    """Keep [[said:]] only when it is a light cleanup of raw STT — reject context fill-ins.
+
+    Example rejected: raw=\"I don't know\" → said=\"I don't know the error in my Python code\"
+    """
+    if not said:
+        return None
+    raw_words = _normalize_words(raw)
+    said_words = _normalize_words(said)
+    if not said_words or not raw_words:
+        return None
+    # Reject large expansions (AI inventing words from conversation context).
+    max_extra = max(2, len(raw_words) // 2)
+    if len(said_words) > len(raw_words) + max_extra:
+        return None
+    raw_set = set(raw_words)
+    shared = sum(1 for w in said_words if w in raw_set)
+    if shared < max(1, int(round(0.55 * len(said_words)))):
+        return None
+    return said.strip()
 
 
 def parse_better_tag(text: str) -> tuple[str, str | None]:

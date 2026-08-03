@@ -1,11 +1,11 @@
 /* EngLearning PWA service worker — static shell only; /api is network-first. */
-const CACHE_NAME = "englearning-shell-v61";
+const CACHE_NAME = "englearning-shell-v62";
 const SHELL_URLS = [
   "/",
   "/static/index.html",
-  "/static/app.js?v=61",
-  "/static/v2-shell.js?v=61",
-  "/static/styles.css?v=61",
+  "/static/app.js?v=62",
+  "/static/v2-shell.js?v=62",
+  "/static/styles.css?v=62",
   "/static/manifest.webmanifest",
 ];
 

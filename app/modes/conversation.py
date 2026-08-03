@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -17,8 +18,10 @@ from app.learning_store import (
     parse_score_tag,
     parse_tip_tag,
     parse_topic_tag,
+    parse_unclear_tag,
     parse_unknown_tags,
     parse_wrong_tags,
+    sanitize_said,
 )
 from app.context_limits import CHAT_HISTORY_MESSAGES_MAX, trim_chat_history
 from app.prompts import conversation_system_prompt, free_debate_system_prompt
@@ -60,6 +63,12 @@ class ConversationSession:
     confused_count: int = 0
     continued_once: bool = False
     stats_recorded: bool = False
+    # Consecutive unclear / wrong / "don't understand" on the same beat.
+    answer_fail_streak: int = 0
+    pending_wrongs: list[tuple[str, str]] = field(default_factory=list)
+    pending_confused: list[tuple[str, str]] = field(default_factory=list)
+    awaiting_repeat: bool = False
+    last_unclear_reason: str = ""
 
 
 class ConversationEngine:
@@ -198,12 +207,14 @@ class ConversationEngine:
         str | None,
         str | None,
         int | None,
+        str | None,
     ]:
         cleaned, unknowns = parse_unknown_tags(reply)
         cleaned, facts = parse_learn_tags(cleaned)
         cleaned, topic = parse_topic_tag(cleaned)
         cleaned, confused = parse_confused_tags(cleaned)
         cleaned, said = parse_said_tag(cleaned)
+        cleaned, unclear = parse_unclear_tag(cleaned)
         cleaned, wrongs = parse_wrong_tags(cleaned)
         cleaned, better = parse_better_tag(cleaned)
         cleaned, tip = parse_tip_tag(cleaned)
@@ -214,8 +225,8 @@ class ConversationEngine:
             session.suggested_topic = topic
             session.topic = topic
         cleaned, asked = self._consume_ask_marker(cleaned)
-        # Continue-offer / goodbye questions do not count toward the quota.
-        if asked and not offered_continue and continue_decision != "no":
+        # Continue-offer / goodbye / repeat-ask questions do not count toward the quota.
+        if asked and not offered_continue and continue_decision != "no" and not unclear:
             session.questions_asked += 1
         if offered_continue and not session.free_debate:
             session.awaiting_continue = True
@@ -229,14 +240,22 @@ class ConversationEngine:
             session.awaiting_continue = False
             session.phase = "done"
         self._store_unknowns(session, unknowns)
-        self._store_confused(session, confused)
-        self._store_wrongs(session, wrongs)
+        # Wrong / confused are deferred until fail streak reaches 2 (see user_turn).
         session.unknowns_count += len(unknowns)
-        session.confused_count += len(confused)
-        session.wrongs_count += len(wrongs)
         if facts:
             session.learned_facts.extend(facts)
-        return cleaned.strip(), unknowns, facts, confused, said, wrongs, better, tip, speak_score
+        return (
+            cleaned.strip(),
+            unknowns,
+            facts,
+            confused,
+            said,
+            wrongs,
+            better,
+            tip,
+            speak_score,
+            unclear,
+        )
 
     def _progress_payload(self, session: ConversationSession) -> dict[str, Any]:
         return {
@@ -290,7 +309,7 @@ class ConversationEngine:
                 "Ask one in-character question and end with [[ask]]."
             )
         reply = await llm.chat([{"role": "user", "content": starter}], system=system)
-        cleaned, _u, _f, _c, _said, _w, _b, _t, _s = self._process_reply(session, reply)
+        cleaned, _u, _f, _c, _said, _w, _b, _t, _s, _unc = self._process_reply(session, reply)
         session.history.append({"role": "assistant", "content": cleaned})
         session.opening = cleaned
         return cleaned
@@ -299,19 +318,27 @@ class ConversationEngine:
         stt_note = ""
         if from_stt:
             stt_note = (
-                " The user text is a Whisper transcript — fix STT nonsense via [[said:...]] "
-                "and answer the intended meaning."
+                " The user text is a Whisper transcript. "
+                "[[said:]] = light cleanup of RAW words ONLY — never invent context. "
+                "If unsure what they said, mark [[unclear:reason]] and ask them to repeat."
             )
         base = (
             "\n(System note: Stay IN CHARACTER in the agreed scenario."
             f"{stt_note} "
-            "Always mark [[said:cleaned English of what they meant]]. "
+            "Always mark [[said:light cleanup of raw transcript only]]. "
             "If answer content is clearly wrong (not STT noise), mark "
             "[[wrong:summary|Slovak tip]] and briefly correct in parentheses. "
             "Do NOT meta-teach phrases ('you can say…', 'try saying…'). "
             "If the learner does not understand your question, mark "
             "[[confused:summary|note]], rephrase more simply IN CHARACTER, and ask again."
         )
+        if session.awaiting_repeat:
+            return (
+                base
+                + " You asked them to REPEAT their last answer because capture was unclear. "
+                "Listen again. If still unclear, mark [[unclear:...]] again. "
+                "If clear now, answer their meaning and continue. End questions with [[ask]].)"
+            )
         if session.phase == "done":
             return (
                 base
@@ -348,6 +375,67 @@ class ConversationEngine:
             "Do not repeat earlier questions. End question turns with [[ask]].)"
         )
 
+    def _apply_fail_streak(
+        self,
+        session: ConversationSession,
+        *,
+        unclear: str | None,
+        wrongs: list[tuple[str, str]],
+        confused: list[tuple[str, str]],
+    ) -> tuple[bool, bool]:
+        """Track consecutive fails. Returns (needs_repeat, logged_to_progress)."""
+        failed = bool(unclear) or bool(wrongs) or bool(confused)
+        if not failed:
+            session.answer_fail_streak = 0
+            session.pending_wrongs = []
+            session.pending_confused = []
+            session.awaiting_repeat = False
+            session.last_unclear_reason = ""
+            return False, False
+
+        session.answer_fail_streak += 1
+        if wrongs:
+            session.pending_wrongs.extend(wrongs)
+        if confused:
+            session.pending_confused.extend(confused)
+        if unclear:
+            session.last_unclear_reason = unclear
+            session.awaiting_repeat = True
+
+        logged = False
+        if session.answer_fail_streak >= 2:
+            if session.pending_wrongs:
+                self._store_wrongs(session, session.pending_wrongs)
+                session.wrongs_count += len(session.pending_wrongs)
+                logged = True
+            if session.pending_confused:
+                self._store_confused(session, session.pending_confused)
+                session.confused_count += len(session.pending_confused)
+                logged = True
+            if unclear and not session.pending_confused:
+                # Unclear twice with no explicit confused tag — still log progress.
+                self._store_confused(
+                    session,
+                    [
+                        (
+                            f"Unclear speech: {unclear}"[:120],
+                            "AI si nebola istá zachytením — 2× nejasná odpoveď.",
+                        )
+                    ],
+                )
+                session.confused_count += 1
+                logged = True
+            session.pending_wrongs = []
+            session.pending_confused = []
+            session.answer_fail_streak = 0
+            session.awaiting_repeat = False
+            return False, logged
+
+        # First fail: ask to repeat only when STT capture is uncertain.
+        needs_repeat = bool(unclear)
+        session.awaiting_repeat = needs_repeat
+        return needs_repeat, False
+
     async def user_turn(
         self,
         session: ConversationSession,
@@ -360,14 +448,15 @@ class ConversationEngine:
         stt_note = ""
         if from_stt:
             stt_note = (
-                " The user text is a Whisper transcript — fix STT nonsense via [[said:...]] "
-                "and answer the intended meaning."
+                " The user text is a Whisper transcript. "
+                "[[said:]] = light cleanup of RAW only — never invent context words. "
+                "If unsure, mark [[unclear:reason]] and ask to repeat."
             )
         if session.free_debate:
             hint = (
                 "\n(System note: continue the free debate. Follow the learner's interest."
                 f"{stt_note} "
-                "Always mark [[said:cleaned English]]. "
+                "Always mark [[said:light cleanup of raw only]]. "
                 "If the answer content is clearly wrong, mark [[wrong:summary|Slovak tip]]. "
                 "Mark new personal facts with [[learn:...]] and unknown words with "
                 "[[unknown:word|Slovak]]. If they do not understand your question, mark "
@@ -384,20 +473,34 @@ class ConversationEngine:
             [{"role": m["role"], "content": m["content"]} for m in session.history],
             system=system,
         )
-        cleaned, unknowns, facts, confused, said, wrongs, better, tip, speak_score = (
-            self._process_reply(session, reply)
+        (
+            cleaned,
+            unknowns,
+            facts,
+            confused,
+            said,
+            wrongs,
+            better,
+            tip,
+            speak_score,
+            unclear,
+        ) = self._process_reply(session, reply)
+
+        # For STT: show exactly what was heard; reject AI context fill-ins in [[said:]].
+        safe_said = sanitize_said(user_text, said) if from_stt else (said or None)
+        if from_stt:
+            display_user = (user_text or "").strip() or user_text
+            # If model invented a long said and did not mark unclear, force unclear path
+            # when said was rejected as expansion.
+            if said and safe_said is None and not unclear and len(_wordish(said)) > len(_wordish(user_text)) + 2:
+                unclear = unclear or "said expanded beyond transcript"
+        else:
+            display_user = (safe_said or said or user_text).strip() or user_text
+
+        needs_repeat, logged = self._apply_fail_streak(
+            session, unclear=unclear, wrongs=wrongs, confused=confused
         )
-        # If quota just hit and model forgot to offer continue, keep phase active until next turn
-        # but force awaiting via soft flag when asked count crossed target without offer.
-        if (
-            not session.free_debate
-            and session.phase == "active"
-            and not session.awaiting_continue
-            and session.questions_asked >= session.question_target
-        ):
-            # Next user_turn hint will force [[ask_continue]].
-            pass
-        display_user = (said or user_text).strip() or user_text
+
         session.history[-1] = {"role": "user", "content": display_user}
         session.history.append({"role": "assistant", "content": cleaned})
         session.history = trim_chat_history(
@@ -412,15 +515,22 @@ class ConversationEngine:
 
         out: dict[str, Any] = {
             "reply": cleaned,
-            "said": said,
-            "better": better,
+            # "said" in UI = what the learner actually uttered (raw for STT).
+            "said": display_user,
+            "said_cleaned": safe_said,
             "tip": tip,
+            "better": better,
             "speak_score": speak_score,
             "transcript_raw": user_text,
             "transcript_display": display_user,
             "unknowns": [{"word": w, "translation": t} for w, t in unknowns],
             "confused": [{"summary": s, "note": n} for s, n in confused],
             "wrongs": [{"summary": s, "note": n} for s, n in wrongs],
+            "unclear": unclear,
+            "needs_repeat": needs_repeat,
+            "awaiting_repeat": session.awaiting_repeat,
+            "answer_fail_streak": session.answer_fail_streak,
+            "logged_to_progress": logged,
             "learned_facts": facts,
             "suggested_topic": session.suggested_topic,
             "free_debate": session.free_debate,
@@ -496,3 +606,7 @@ class ConversationEngine:
             cleaned = (text[:idx] + text[idx + len(marker) :]).strip()
             return cleaned, True
         return text, text.strip().endswith("?")
+
+
+def _wordish(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9']+", (text or "").lower())

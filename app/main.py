@@ -1250,7 +1250,7 @@ async def conversation_utterance(
     llm = get_provider(settings, session.provider_name, getattr(session, "llm_model", None) or None)
     result = await conversation_engine.user_turn(session, llm, transcript, from_stt=True)
     facts = list(result.get("learned_facts") or [])
-    display = (result.get("transcript_display") or result.get("said") or transcript).strip()
+    display = (result.get("transcript_raw") or result.get("transcript_display") or transcript).strip()
     added = _log_conversation_turn(session, display, result["reply"], facts=facts)
     stats_summary = None
     if result.get("phase") == "done":
@@ -1262,6 +1262,7 @@ async def conversation_utterance(
         **result,
         "transcript": display,
         "transcript_raw": transcript,
+        "said": display,
         "audio_base64": audio_b64,
         "learned_facts": added,
         "speech_rate": rate,

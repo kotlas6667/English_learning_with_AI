@@ -236,7 +236,13 @@
   function showTurnFeedback(data) {
     const panel = $("turnFeedback");
     if (!panel || !data) return;
-    const said = data.said || data.transcript_display || data.transcript || "";
+    // Prefer raw STT / display — never show AI-invented expansions as "what you said".
+    const said =
+      data.transcript_raw
+      || data.transcript_display
+      || data.said
+      || data.transcript
+      || "";
     const better = data.better || "";
     const tip = data.tip || "";
     const score = data.speak_score ?? data.score;
@@ -253,6 +259,40 @@
         score != null && score !== "" ? String(score) : "—";
     }
     panel.classList.remove("hidden");
+  }
+
+  function showRepeatBanner(data) {
+    const banner = $("repeatBanner");
+    const text = $("repeatBannerText");
+    if (!banner) return;
+    const needs = !!(data && (data.needs_repeat || data.awaiting_repeat));
+    if (!needs) {
+      banner.classList.add("hidden");
+      return;
+    }
+    if (text) {
+      if (data.unclear) {
+        text.textContent = "AI si nie je istá, čo si povedal — zopakuj odpoveď.";
+      } else if (data.confused?.length) {
+        text.textContent = "Skús ešte raz — AI otázku preformuluje, odpovedz jednoducho.";
+      } else {
+        text.textContent = "Skús odpoveď ešte raz jasnejšie.";
+      }
+    }
+    banner.classList.remove("hidden");
+  }
+
+  function wireRepeatBanner() {
+    $("repeatAnswerBtn")?.addEventListener("click", () => {
+      $("repeatBanner")?.classList.add("hidden");
+      const mic = $("pttMicBtn");
+      if (mic && !mic.classList.contains("hidden")) {
+        mic.focus();
+        mic.click();
+      } else {
+        window.__engFocusMic?.();
+      }
+    });
   }
 
   function showRecap(data) {
@@ -352,10 +392,12 @@
   wireHomeActions();
   wireRecap();
   wireLearningGoal();
+  wireRepeatBanner();
   registerServiceWorker();
 
   window.__engShowView = showView;
   window.__engShowTurnFeedback = showTurnFeedback;
+  window.__engShowRepeatBanner = showRepeatBanner;
   window.__engShowRecap = showRecap;
   window.__engUpdateHomeFromStats = updateHomeFromStats;
   window.__engLoadScenarios = loadScenarios;

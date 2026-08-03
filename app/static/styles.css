@@ -1203,6 +1203,23 @@ body.lesson-open .shell-app {
   color: var(--accent);
 }
 
+.repeat-banner {
+  margin: 0.65rem 0 0.85rem;
+  padding: 0.85rem 0.95rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 8%, #fffef9);
+  display: grid;
+  gap: 0.65rem;
+}
+.repeat-banner.hidden { display: none !important; }
+.repeat-banner p {
+  margin: 0;
+  font-size: 0.95rem;
+  line-height: 1.35;
+}
+.repeat-banner .primary { width: fit-content; }
+
 @media (max-width: 640px) {
   .turn-feedback-grid { grid-template-columns: 1fr; }
   .shell-app { width: min(100% - 1.2rem, 980px); padding-top: 1.2rem; }

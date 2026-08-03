@@ -1491,6 +1491,7 @@
       if (data.stats) renderStats(data.stats);
       else if (data.phase === "done") await loadStats().catch(() => {});
       window.__engShowTurnFeedback?.(data);
+      window.__engShowRepeatBanner?.(data);
       if (data.phase === "done" || data.conversation_phase === "done" || data.recap) {
         window.__engShowRecap?.(data);
       }
@@ -2154,21 +2155,29 @@
         return;
       }
       const shown =
-        data.transcript_display || data.said || data.transcript || "(audio)";
+        data.transcript_raw || data.transcript_display || data.said || data.transcript || "(audio)";
       appendChat("user", shown);
       appendChat("assistant", data.reply, { audioBase64: data.audio_base64 });
       updateQuestionProgress(data);
-      if ((data.wrongs && data.wrongs.length) || (data.confused && data.confused.length) || (data.unknowns && data.unknowns.length)) {
+      if ((data.wrongs && data.wrongs.length) || (data.confused && data.confused.length) || (data.unknowns && data.unknowns.length) || data.logged_to_progress) {
         loadLearning().catch(() => {});
       }
       const confusedNote = data.confused?.length
         ? `Zapísané: nerozumel otázke — ${data.confused.map((c) => c.summary).filter(Boolean).join("; ")}. `
         : "";
       const wrongNote = data.wrongs?.length
-        ? `Zapísané zlá odpoveď — ${data.wrongs.map((w) => w.summary).filter(Boolean).join("; ")}. `
+        ? `Zlá odpoveď — ${data.wrongs.map((w) => w.summary).filter(Boolean).join("; ")}. `
         : "";
       const qLabel = `Otázky: ${data.questions_asked}/${data.question_target || data.min_questions}`;
-      if (data.awaiting_continue || data.phase === "awaiting_continue") {
+      if (data.needs_repeat || data.awaiting_repeat) {
+        setStatus(
+          data.unclear
+            ? "AI si nie je istá zachytením — zopakuj odpoveď do mikrofónu."
+            : "Skús odpoveď ešte raz jasnejšie."
+        );
+      } else if (data.logged_to_progress) {
+        setStatus(`Zapísané do progresu. ${qLabel}`);
+      } else if (data.awaiting_continue || data.phase === "awaiting_continue") {
         setStatus(`${qLabel} — AI sa pýta, či chceš pokračovať.`);
       } else if (data.phase === "done") {
         setStatus(`Lekcia ukončená (${qLabel}).`);
@@ -2185,6 +2194,7 @@
       if (data.stats) renderStats(data.stats);
       else if (data.phase === "done") await loadStats().catch(() => {});
       window.__engShowTurnFeedback?.(data);
+      window.__engShowRepeatBanner?.(data);
       if (data.phase === "done" || data.conversation_phase === "done" || data.recap) {
         window.__engShowRecap?.(data);
       }
